@@ -205,9 +205,9 @@ void main() {
         (gradientBackground.decoration as BoxDecoration).gradient!
             as LinearGradient;
     expect(welcomeGradient.colors, [
-      const Color(0xFF17202A),
-      const Color(0xFF080B12),
-      const Color(0xFF11131A),
+      Colors.white,
+      const Color(0xFFF4F6FB),
+      const Color(0xFFE6EEFC),
     ]);
     expect(
       find.descendant(of: welcome, matching: find.byType(CustomPaint)),
