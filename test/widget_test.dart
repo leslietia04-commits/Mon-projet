@@ -24,11 +24,11 @@ void main() {
     await tester.tap(
       find.descendant(
         of: find.byType(NavigationBar),
-        matching: find.text('Prospects'),
+        matching: find.text('Visiteurs'),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Ajouter un prospect'));
+    await tester.tap(find.text('Ajouter un visiteur'));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Nom complet *'),
@@ -284,12 +284,66 @@ class _FakeStore implements ExhibitorStore {
     ),
   ];
   final List<LeadItem> leads = [];
+  final List<AgentItem> agents = [];
 
   @override
   Future<List<EventItem>> getEvents() async => events;
 
   @override
   Future<List<LeadItem>> getLeads() async => leads;
+
+  @override
+  Future<List<AgentItem>> getAgents() async => agents;
+
+  @override
+  Future<AgentItem?> getAgentByEmail(String email) async {
+    for (final agent in agents) {
+      if (agent.email.toLowerCase() == email.toLowerCase()) return agent;
+    }
+    return null;
+  }
+
+  @override
+  Future<void> addAgent({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    agents.add(
+      AgentItem(
+        id: agents.length + 1,
+        name: name,
+        email: email,
+        password: password,
+        eventId: eventId,
+      ),
+    );
+  }
+
+  @override
+  Future<void> updateAgent({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    final index = agents.indexWhere((agent) => agent.id == id);
+    if (index < 0) return;
+    agents[index] = AgentItem(
+      id: id,
+      name: name,
+      email: email,
+      password: password,
+      eventId: eventId,
+    );
+  }
+
+  @override
+  Future<void> deleteAgent(int id) async {
+    agents.removeWhere((agent) => agent.id == id);
+  }
 
   @override
   Future<EventItem> addEvent({
@@ -313,6 +367,22 @@ class _FakeStore implements ExhibitorStore {
 
   @override
   Future<void> updateStand(int eventId, String stand) async {}
+
+  @override
+  Future<void> updateProgramme(int eventId, String programme) async {
+    final index = events.indexWhere((event) => event.id == eventId);
+    if (index < 0) return;
+    final event = events[index];
+    events[index] = EventItem(
+      id: event.id,
+      name: event.name,
+      city: event.city,
+      startDate: event.startDate,
+      endDate: event.endDate,
+      stand: event.stand,
+      programme: programme,
+    );
+  }
 
   @override
   Future<void> addLead(LeadDraft draft) async {

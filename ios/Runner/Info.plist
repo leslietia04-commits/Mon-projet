@@ -28,6 +28,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>La caméra sert à scanner le QR code du badge d’un visiteur.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Le microphone sert à enregistrer une note vocale pour un visiteur.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

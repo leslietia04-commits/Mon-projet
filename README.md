@@ -11,7 +11,7 @@ Prototype Flutter pour la gestion des contacts exposants, utilisable hors ligne.
 - Tableau de bord exposant et navigation mobile.
 - Événements et numéros de stand conservés localement.
 - Création d’un événement autonome et rapprochement local par nom, ville et dates.
-- Saisie d’un prospect (nom, entreprise, e-mail et téléphone obligatoires), poste, commercial responsable, qualification Chaud/Tiède/Info, tags et note.
+- Saisie d’un visiteur (nom, entreprise, e-mail et téléphone obligatoires), poste, commercial responsable, qualification Chaud/Tiède/Info, tags et note.
 - Lecture de QR codes de badges en formats JSON, query-string ou lignes `nom:valeur`.
 - Annuaire B2B de démonstration avec recherche, filtre par secteur et fiches.
 - Statistiques locales par niveau de priorité et export CSV copiable dans Excel/CRM.
@@ -24,7 +24,7 @@ officiel. Ce projet ne dispose pas encore de serveur : comptes et liens magiques
 abonnement Pro annuel, paiements/pass selon la taille de l’équipe, codes
 organisateur, annuaire privé, rapprochement avec un événement maître,
 synchronisation arrière-plan, pass e-mail/SMS et envoi du kit média ne sont pas
-actifs. Les statistiques, prospects, événements et le CSV portent uniquement sur
+actifs. Les statistiques, visiteurs, événements et le CSV portent uniquement sur
 les données locales. Les notes vocales et l’export fichier Excel ne sont pas encore
 implémentés. « Remember me » est visuel uniquement et la récupération du mot de
 passe n’envoie aucun e-mail tant que l’authentification serveur n’est pas configurée.

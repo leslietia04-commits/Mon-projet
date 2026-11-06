@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:path/path.dart' as path;
 import 'package:sqflite/sqflite.dart';
 
@@ -9,6 +11,7 @@ class EventItem {
     required this.startDate,
     required this.endDate,
     required this.stand,
+    this.programme = '',
     this.isLocal = true,
   });
 
@@ -18,6 +21,7 @@ class EventItem {
   final String startDate;
   final String endDate;
   final String stand;
+  final String programme;
   final bool isLocal;
 
   factory EventItem.fromMap(Map<String, Object?> map) => EventItem(
@@ -27,6 +31,7 @@ class EventItem {
     startDate: map['start_date']! as String,
     endDate: map['end_date']! as String,
     stand: map['stand']! as String,
+    programme: map['programme'] as String? ?? '',
     isLocal: (map['is_local']! as int) == 1,
   );
 }
@@ -46,6 +51,7 @@ class LeadItem {
     required this.note,
     required this.createdAt,
     required this.synced,
+    this.voiceNote,
   });
 
   final int id;
@@ -59,6 +65,7 @@ class LeadItem {
   final String priority;
   final String tags;
   final String note;
+  final Uint8List? voiceNote;
   final String createdAt;
   final bool synced;
 
@@ -74,6 +81,7 @@ class LeadItem {
     priority: map['priority']! as String,
     tags: map['tags']! as String,
     note: map['note']! as String,
+    voiceNote: map['voice_note'] as Uint8List?,
     createdAt: map['created_at']! as String,
     synced: (map['synced']! as int) == 1,
   );
@@ -91,6 +99,7 @@ class LeadDraft {
     required this.priority,
     required this.tags,
     required this.note,
+    this.voiceNote,
   });
 
   final int eventId;
@@ -103,11 +112,52 @@ class LeadDraft {
   final String priority;
   final List<String> tags;
   final String note;
+  final Uint8List? voiceNote;
+}
+
+class AgentItem {
+  const AgentItem({
+    required this.id,
+    required this.name,
+    required this.email,
+    required this.password,
+    required this.eventId,
+  });
+
+  final int id;
+  final String name;
+  final String email;
+  final String password;
+  final int eventId;
+
+  factory AgentItem.fromMap(Map<String, Object?> map) => AgentItem(
+    id: map['id']! as int,
+    name: map['name']! as String,
+    email: map['email']! as String,
+    password: map['password']! as String,
+    eventId: map['event_id']! as int,
+  );
 }
 
 abstract interface class ExhibitorStore {
   Future<List<EventItem>> getEvents();
   Future<List<LeadItem>> getLeads();
+  Future<List<AgentItem>> getAgents();
+  Future<AgentItem?> getAgentByEmail(String email);
+  Future<void> addAgent({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  });
+  Future<void> updateAgent({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  });
+  Future<void> deleteAgent(int id);
   Future<EventItem> addEvent({
     required String name,
     required String city,
@@ -116,6 +166,7 @@ abstract interface class ExhibitorStore {
     required String stand,
   });
   Future<void> updateStand(int eventId, String stand);
+  Future<void> updateProgramme(int eventId, String programme);
   Future<void> addLead(LeadDraft draft);
 }
 
@@ -128,7 +179,7 @@ class SqliteExhibitorStore implements ExhibitorStore {
     final databasePath = await getDatabasesPath();
     return openDatabase(
       path.join(databasePath, 'digitalyx_exhibitor.db'),
-      version: 3,
+      version: 6,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE events (
@@ -138,6 +189,7 @@ class SqliteExhibitorStore implements ExhibitorStore {
             start_date TEXT NOT NULL,
             end_date TEXT NOT NULL,
             stand TEXT NOT NULL DEFAULT '',
+            programme TEXT NOT NULL DEFAULT '',
             is_local INTEGER NOT NULL DEFAULT 1
           )
         ''');
@@ -154,8 +206,19 @@ class SqliteExhibitorStore implements ExhibitorStore {
             priority TEXT NOT NULL,
             tags TEXT NOT NULL,
             note TEXT NOT NULL,
+            voice_note BLOB,
             created_at TEXT NOT NULL,
             synced INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (event_id) REFERENCES events (id)
+          )
+        ''');
+        await db.execute('''
+          CREATE TABLE agents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            password TEXT NOT NULL,
+            event_id INTEGER NOT NULL,
             FOREIGN KEY (event_id) REFERENCES events (id)
           )
         ''');
@@ -179,6 +242,26 @@ class SqliteExhibitorStore implements ExhibitorStore {
             "ALTER TABLE leads ADD COLUMN owner TEXT NOT NULL DEFAULT 'Équipe de stand'",
           );
         }
+        if (oldVersion < 4) {
+          await db.execute(
+            "ALTER TABLE events ADD COLUMN programme TEXT NOT NULL DEFAULT ''",
+          );
+        }
+        if (oldVersion < 5) {
+          await db.execute('''
+            CREATE TABLE agents (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              email TEXT NOT NULL COLLATE NOCASE UNIQUE,
+              password TEXT NOT NULL,
+              event_id INTEGER NOT NULL,
+              FOREIGN KEY (event_id) REFERENCES events (id)
+            )
+          ''');
+        }
+        if (oldVersion < 6) {
+          await db.execute('ALTER TABLE leads ADD COLUMN voice_note BLOB');
+        }
       },
     );
   }
@@ -193,6 +276,67 @@ class SqliteExhibitorStore implements ExhibitorStore {
   Future<List<LeadItem>> getLeads() async {
     final rows = await (await _db).query('leads', orderBy: 'created_at DESC');
     return rows.map(LeadItem.fromMap).toList();
+  }
+
+  @override
+  Future<List<AgentItem>> getAgents() async {
+    final rows = await (await _db).query(
+      'agents',
+      orderBy: 'name COLLATE NOCASE',
+    );
+    return rows.map(AgentItem.fromMap).toList();
+  }
+
+  @override
+  Future<AgentItem?> getAgentByEmail(String email) async {
+    final rows = await (await _db).query(
+      'agents',
+      where: 'LOWER(email) = ?',
+      whereArgs: [email.trim().toLowerCase()],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : AgentItem.fromMap(rows.first);
+  }
+
+  @override
+  Future<void> addAgent({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    await (await _db).insert('agents', {
+      'name': name.trim(),
+      'email': email.trim().toLowerCase(),
+      'password': password,
+      'event_id': eventId,
+    });
+  }
+
+  @override
+  Future<void> updateAgent({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    await (await _db).update(
+      'agents',
+      {
+        'name': name.trim(),
+        'email': email.trim().toLowerCase(),
+        'password': password,
+        'event_id': eventId,
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  @override
+  Future<void> deleteAgent(int id) async {
+    await (await _db).delete('agents', where: 'id = ?', whereArgs: [id]);
   }
 
   @override
@@ -233,6 +377,16 @@ class SqliteExhibitorStore implements ExhibitorStore {
   }
 
   @override
+  Future<void> updateProgramme(int eventId, String programme) async {
+    await (await _db).update(
+      'events',
+      {'programme': programme.trim()},
+      where: 'id = ?',
+      whereArgs: [eventId],
+    );
+  }
+
+  @override
   Future<void> addLead(LeadDraft draft) async {
     await (await _db).insert('leads', {
       'event_id': draft.eventId,
@@ -245,6 +399,7 @@ class SqliteExhibitorStore implements ExhibitorStore {
       'priority': draft.priority,
       'tags': draft.tags.join(','),
       'note': draft.note.trim(),
+      'voice_note': draft.voiceNote,
       'created_at': DateTime.now().toIso8601String(),
       'synced': 0,
     });

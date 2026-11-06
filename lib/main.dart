@@ -1,35 +1,38 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:record/record.dart';
 import 'package:sqflite/sqflite.dart' show databaseFactory;
 import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
 
 import 'data/local_store.dart';
+import 'data/digitalyx_api.dart';
 
 void main() {
   // Sur le web, sqflite n'a pas de moteur natif : on passe par sqlite3 en WASM.
   if (kIsWeb) databaseFactory = databaseFactoryFfiWebNoWebWorker;
-  runApp(DigitalyxApp(store: SqliteExhibitorStore()));
+  runApp(DigitalyxApp(store: SqliteExhibitorStore(), api: DigitalyxApi()));
 }
 
-// Palette de l'application. Pour revenir au vert d'origine : _useBlue = false.
-const _useBlue = true;
-
-const _ink = _useBlue ? Color(0xFF0F1E3D) : Color(0xFF14231E);
-const _brand = _useBlue ? Color(0xFF1F5FD1) : Color(0xFF167A58);
-const _brandDeep = _useBlue ? Color(0xFF123C8A) : Color(0xFF155B43);
-const _brandBright = _useBlue ? Color(0xFF3B82F6) : Color(0xFF238963);
-const _brandDark = _useBlue ? Color(0xFF14336F) : Color(0xFF173E30);
-const _brandTint = _useBlue ? Color(0xFFE6EEFC) : Color(0xFFE8F3EB);
-const _brandTintStrong = _useBlue ? Color(0xFFD3E0F7) : Color(0xFFD9E5DB);
-const _lime = _useBlue ? Color(0xFF9CC2FF) : Color(0xFFD8F36A);
-const _paper = _useBlue ? Color(0xFFF4F6FB) : Color(0xFFF5F7F3);
-const _line = _useBlue ? Color(0xFFE3E8F2) : Color(0xFFEAEEEA);
-const _muted = _useBlue ? Color(0xFF68738C) : Color(0xFF77827A);
-const _mutedSoft = _useBlue ? Color(0xFF9AA4B8) : Color(0xFF98A099);
+// Palette événementielle chaleureuse : violet profond et corail sur fond clair.
+const _ink = Color(0xFF0F1E3D);
+const _brand = Color(0xFF1F5FD1);
+const _brandDeep = Color(0xFF123C8A);
+const _brandBright = Color(0xFF3B82F6);
+const _brandDark = Color(0xFF14336F);
+const _brandTint = Color(0xFFE6EEFC);
+const _brandTintStrong = Color(0xFFD3E0F7);
+const _accent = Color(0xFFF27F69);
+const _paper = Color(0xFFF8F7FB);
+const _line = Color(0xFFE3E8F2);
+const _muted = Color(0xFF68738C);
+const _mutedSoft = Color(0xFF9AA4B8);
 
 const _directory = [
   ExhibitorProfile(
@@ -79,8 +82,9 @@ class ExhibitorProfile {
 }
 
 class DigitalyxApp extends StatefulWidget {
-  const DigitalyxApp({super.key, required this.store});
+  const DigitalyxApp({super.key, required this.store, this.api});
   final ExhibitorStore store;
+  final DigitalyxApi? api;
 
   @override
   State<DigitalyxApp> createState() => _DigitalyxAppState();
@@ -89,10 +93,16 @@ class DigitalyxApp extends StatefulWidget {
 class _DigitalyxAppState extends State<DigitalyxApp> {
   int _tab = 0;
   bool _hasDemoSession = false;
+  late final DigitalyxApi _api = widget.api ?? DigitalyxApi();
   String _username = '';
+  String _accountName = '';
+  AgentItem? _activeAgent;
+  List<AgentItem> _agents = [];
   final _navigatorKey = GlobalKey<NavigatorState>();
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   late Future<void> _loading;
+  Timer? _splashTimer;
+  bool _showSplash = true;
   List<EventItem> _events = [];
   List<LeadItem> _leads = [];
 
@@ -100,22 +110,95 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
   void initState() {
     super.initState();
     _loading = _refresh();
+    _splashTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _showSplash = false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _splashTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _refresh() async {
     final values = await Future.wait([
       widget.store.getEvents(),
       widget.store.getLeads(),
+      widget.store.getAgents(),
     ]);
     if (!mounted) return;
     setState(() {
       _events = values[0] as List<EventItem>;
       _leads = values[1] as List<LeadItem>;
+      _agents = values[2] as List<AgentItem>;
     });
   }
 
   Future<void> _saveLead(LeadDraft draft) async {
     await widget.store.addLead(draft);
+    await _refresh();
+  }
+
+  Future<List<LeadItem>> _saveLeadAndGetLeads(LeadDraft draft) async {
+    await _saveLead(draft);
+    return List<LeadItem>.of(_leads);
+  }
+
+  Future<bool> _login(String username, String password) async {
+    final result = await _api.login(email: username, password: password);
+    setState(() {
+      _username = username;
+      _accountName = result.displayName;
+      _activeAgent = null;
+      _hasDemoSession = true;
+      _tab = 0;
+    });
+    return true;
+  }
+
+  Future<Map<String, dynamic>> _registerAccount(
+    RegistrationData registration,
+  ) => _api.createAccount(
+    name: registration.fullName,
+    email: registration.email,
+    contact: registration.phone,
+  );
+
+  Future<void> _createAgent({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    await widget.store.addAgent(
+      name: name,
+      email: email,
+      password: password,
+      eventId: eventId,
+    );
+    await _refresh();
+  }
+
+  Future<void> _updateAgent({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  }) async {
+    await widget.store.updateAgent(
+      id: id,
+      name: name,
+      email: email,
+      password: password,
+      eventId: eventId,
+    );
+    await _refresh();
+  }
+
+  Future<void> _deleteAgent(int id) async {
+    await widget.store.deleteAgent(id);
     await _refresh();
   }
 
@@ -141,9 +224,95 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
     await _refresh();
   }
 
+  Future<void> _openNewEventForm(BuildContext context) async {
+    final result = await showModalBottomSheet<_NewEventData>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _paper,
+      builder: (_) => const _EventFormSheet(),
+    );
+    if (result == null || !mounted) return;
+
+    EventItem? duplicate;
+    for (final event in _events) {
+      if (_normalize(event.name) == _normalize(result.name) &&
+          _normalize(event.city) == _normalize(result.city) &&
+          event.startDate == result.startDate &&
+          event.endDate == result.endDate) {
+        duplicate = event;
+        break;
+      }
+    }
+
+    if (duplicate != null) {
+      await _joinEvent(duplicate, result.stand);
+      if (mounted) setState(() => _tab = 3);
+      _showMessage('Stand mis à jour sur cet appareil.');
+      return;
+    }
+
+    await _createEvent(
+      name: result.name,
+      city: result.city,
+      startDate: result.startDate,
+      endDate: result.endDate,
+      stand: result.stand,
+    );
+    if (mounted) {
+      setState(() => _tab = 3);
+      _showMessage('Événement créé localement.');
+    }
+  }
+
+  Future<void> _updateEventProgramme(int eventId, String programme) async {
+    await widget.store.updateProgramme(eventId, programme);
+    await _refresh();
+  }
+
+  Future<void> _openVisitorsForPriority(String priority) async {
+    await _navigatorKey.currentState!.push<void>(
+      MaterialPageRoute(
+        builder: (_) => EventVisitorsPage(
+          events: _events,
+          leads: _leads,
+          selectedEventId: null,
+          initialPriority: priority,
+          onSaveLead: _saveLeadAndGetLeads,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openVisitorsForPosition(String positionCode) async {
+    await _navigatorKey.currentState!.push<void>(
+      MaterialPageRoute(
+        builder: (_) => EventVisitorsPage(
+          events: _events,
+          leads: _leads,
+          selectedEventId: null,
+          initialPositionFilter: _executivePositionFilter(positionCode),
+          onSaveLead: _saveLeadAndGetLeads,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openEventVisitors(EventItem event) async {
+    await _navigatorKey.currentState!.push<void>(
+      MaterialPageRoute(
+        builder: (_) => EventVisitorsPage(
+          events: _events,
+          leads: _leads,
+          selectedEventId: event.id,
+          onSaveLead: _saveLeadAndGetLeads,
+        ),
+      ),
+    );
+  }
+
   Future<void> _openCapture({bool scan = false}) async {
     if (_events.isEmpty) {
-      _showMessage('Ajoute d’abord un événement pour enregistrer un prospect.');
+      _showMessage('Ajoute d’abord un événement pour enregistrer un visiteur.');
       setState(() => _tab = 3);
       return;
     }
@@ -158,7 +327,7 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
     );
     if (saved == true && mounted) {
       _showMessage(
-        'Prospect enregistré sur cet appareil. Aucune donnée envoyée.',
+        'Visiteur enregistré sur cet appareil. Aucune donnée envoyée.',
       );
     }
   }
@@ -218,6 +387,7 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
       home: FutureBuilder<void>(
         future: _loading,
         builder: (context, snapshot) {
+          if (_showSplash) return const SplashScreen();
           if (snapshot.hasError) {
             return Scaffold(
               body: Center(
@@ -251,82 +421,125 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
           }
           if (!_hasDemoSession) {
             return LoginPage(
-              onLogin: (username) {
-                setState(() {
-                  _username = username;
-                  _hasDemoSession = true;
-                });
-                _showMessage(
-                  'Session de démonstration ouverte. Compte non vérifié.',
-                );
-              },
+              onLogin: _login,
+              onCreateAccount: _registerAccount,
             );
           }
-          return _buildShell();
+          if (_activeAgent case final agent?) return _buildAgentHome(agent);
+          return _buildShell(context);
         },
       ),
     );
   }
 
-  Widget _buildShell() {
+  Widget _buildShell(BuildContext context) {
+    final eventsPage = EventsPage(
+      events: _events,
+      leads: _leads,
+      onSaveLead: _saveLeadAndGetLeads,
+      onOpenEvent: _openEventVisitors,
+    );
     final pages = [
       HomePage(
         events: _events,
         leads: _leads,
+        userName: _accountName,
         onCapture: _openCapture,
-        onScan: () => _openCapture(scan: true),
         onEvents: () => setState(() => _tab = 3),
-        onLeads: () => setState(() => _tab = 1),
+        onLeads: () => _openVisitorsForPriority('Tout'),
         onProfile: () => setState(() => _tab = 4),
+        onSaveProgramme: _updateEventProgramme,
+        onPriority: _openVisitorsForPriority,
+        onExecutivePosition: _openVisitorsForPosition,
+        onOpenEvent: _openEventVisitors,
       ),
       LeadsPage(leads: _leads, events: _events, onCapture: _openCapture),
       const DirectoryPage(),
-      EventsPage(events: _events, onCreate: _createEvent, onJoin: _joinEvent),
-      ProfilePage(onMessage: _showMessage, username: _username),
+      eventsPage,
+      ProfilePage(
+        onMessage: _showMessage,
+        username: _username,
+        events: _events,
+        agents: _agents,
+        onCreateAgent: _createAgent,
+        onUpdateAgent: _updateAgent,
+        onDeleteAgent: _deleteAgent,
+      ),
     ];
     return Scaffold(
       body: SafeArea(
-        bottom: false,
         child: IndexedStack(index: _tab, children: pages),
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (index) => setState(() => _tab = index),
-        backgroundColor: Colors.white,
-        indicatorColor: _brandTint,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.grid_view_rounded),
-            label: 'Accueil',
-          ),
-          NavigationDestination(
-            key: ValueKey('nav-leads'),
-            icon: Icon(Icons.people_alt_outlined),
-            label: 'Prospects',
-          ),
-          NavigationDestination(
-            key: ValueKey('nav-directory'),
-            icon: Icon(Icons.storefront_outlined),
-            label: 'Annuaire',
-          ),
-          NavigationDestination(
-            key: ValueKey('nav-events'),
-            icon: Icon(Icons.event_outlined),
-            label: 'Salons',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.person_outline),
-            label: 'Profil',
-          ),
-        ],
+      floatingActionButton: _tab == 0
+          ? Builder(
+              builder: (fabContext) => FloatingActionButton(
+                tooltip: 'Ajouter un événement',
+                onPressed: () => _openNewEventForm(fabContext),
+                backgroundColor: _brandDark,
+                foregroundColor: Colors.white,
+                child: const Icon(Icons.add),
+              ),
+            )
+          : null,
+    );
+  }
+
+  Widget _buildAgentHome(AgentItem agent) {
+    final event = _eventFor(_events, agent.eventId);
+    final leads = _leads
+        .where(
+          (lead) =>
+              lead.eventId == agent.eventId &&
+              _normalize(lead.owner) == _normalize(agent.name),
+        )
+        .toList();
+    if (event == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Espace agent')),
+        body: const Center(child: Text('L’événement associé est introuvable.')),
+      );
+    }
+    return AgentHomePage(
+      agent: agent,
+      event: event,
+      leads: leads,
+      onCapture: () => _openAgentCapture(event, agent),
+      onScan: () => _openAgentCapture(event, agent, scan: true),
+      onLogout: () => setState(() {
+        _hasDemoSession = false;
+        _activeAgent = null;
+      }),
+    );
+  }
+
+  Future<void> _openAgentCapture(
+    EventItem event,
+    AgentItem agent, {
+    bool scan = false,
+  }) async {
+    await _navigatorKey.currentState!.push<bool>(
+      MaterialPageRoute(
+        builder: (_) => CapturePage(
+          event: event,
+          initialOwner: agent.name,
+          initialScan: scan,
+          onSave: _saveLead,
+        ),
       ),
     );
+    if (mounted) setState(() {});
   }
 }
 
 class LoginPage extends StatefulWidget {
-  const LoginPage({super.key, required this.onLogin});
-  final ValueChanged<String> onLogin;
+  const LoginPage({
+    super.key,
+    required this.onLogin,
+    required this.onCreateAccount,
+  });
+  final Future<bool> Function(String username, String password) onLogin;
+  final Future<Map<String, dynamic>> Function(RegistrationData registration)
+  onCreateAccount;
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -338,6 +551,7 @@ class _LoginPageState extends State<LoginPage> {
   final _password = TextEditingController();
   bool _rememberMe = false;
   bool _obscurePassword = true;
+  bool _isLoggingIn = false;
 
   @override
   void dispose() {
@@ -346,10 +560,45 @@ class _LoginPageState extends State<LoginPage> {
     super.dispose();
   }
 
-  void _login() {
-    if (!_formKey.currentState!.validate()) return;
+  Future<void> _login() async {
+    if (_isLoggingIn || !_formKey.currentState!.validate()) return;
     FocusScope.of(context).unfocus();
-    widget.onLogin(_username.text.trim());
+    final email = _username.text.trim();
+    setState(() => _isLoggingIn = true);
+    try {
+      final success = await widget.onLogin(email, _password.text);
+      if (!success && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Adresse ou mot de passe incorrect.')),
+        );
+      }
+    } on DigitalyxApiException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } on TimeoutException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Le serveur met trop de temps à répondre.'),
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 10),
+            content: Text('Erreur de connexion : $error'),
+          ),
+        );
+        debugPrint('Erreur connexion Digitalyx: $error');
+      }
+    } finally {
+      if (mounted) setState(() => _isLoggingIn = false);
+    }
   }
 
   @override
@@ -406,11 +655,19 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 7),
                       const Text(
-                        'Prototype hors ligne · identifiants non vérifiés',
+                        'Connexion à votre espace Digitalyx',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: _muted, fontSize: 10),
                       ),
                       const Spacer(),
+                      const Text(
+                        'Réalisé par INOVYX TECH',
+                        style: TextStyle(
+                          color: _mutedSoft,
+                          fontSize: 9,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -455,12 +712,11 @@ class _LoginPageState extends State<LoginPage> {
               icon: Icons.mail_outline_rounded,
               keyboardType: TextInputType.emailAddress,
               textInputAction: TextInputAction.next,
-              suffix: _emailSuffix(_username),
             ),
             const SizedBox(height: 10),
             _loginField(
               controller: _password,
-              label: 'Password',
+              label: 'Mot de passe',
               icon: Icons.lock_outline_rounded,
               obscureText: _obscurePassword,
               textInputAction: TextInputAction.done,
@@ -471,8 +727,8 @@ class _LoginPageState extends State<LoginPage> {
                 color: _muted,
                 icon: Icon(
                   _obscurePassword
-                      ? Icons.visibility_outlined
-                      : Icons.visibility_off_outlined,
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
                   size: 19,
                 ),
                 tooltip: _obscurePassword
@@ -500,7 +756,7 @@ class _LoginPageState extends State<LoginPage> {
                 GestureDetector(
                   onTap: () => setState(() => _rememberMe = !_rememberMe),
                   child: const Text(
-                    'Remember me',
+                    'Se souvenir de moi',
                     style: TextStyle(color: _ink, fontSize: 11),
                   ),
                 ),
@@ -512,7 +768,7 @@ class _LoginPageState extends State<LoginPage> {
                     padding: const EdgeInsets.symmetric(horizontal: 2),
                   ),
                   child: const Text(
-                    'Forgot Password?',
+                    'Mot de passe oublié ?',
                     style: TextStyle(fontSize: 11),
                   ),
                 ),
@@ -536,7 +792,7 @@ class _LoginPageState extends State<LoginPage> {
                   ],
                 ),
                 child: FilledButton(
-                  onPressed: _login,
+                  onPressed: _isLoggingIn ? null : _login,
                   style: FilledButton.styleFrom(
                     backgroundColor: Colors.transparent,
                     foregroundColor: Colors.white,
@@ -545,14 +801,23 @@ class _LoginPageState extends State<LoginPage> {
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
-                  child: const Text(
-                    'LOGIN',
-                    style: TextStyle(
-                      fontSize: 14,
-                      letterSpacing: 2.4,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
+                  child: _isLoggingIn
+                      ? const SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Text(
+                          'SE CONNECTER',
+                          style: TextStyle(
+                            fontSize: 14,
+                            letterSpacing: 2.4,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
                 ),
               ),
             ),
@@ -652,9 +917,9 @@ class _LoginPageState extends State<LoginPage> {
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Forgot Password?'),
+        title: const Text('Mot de passe oublié ?'),
         content: const Text(
-          'La réinitialisation nécessite le service de compte Digitalyx. Aucun e-mail ne sera envoyé en mode démonstration.',
+          'La documentation API fournie ne décrit pas de route de réinitialisation. Contactez l’administrateur Digitalyx pour réinitialiser votre mot de passe.',
         ),
         actions: [
           TextButton(
@@ -671,54 +936,65 @@ class _LoginPageState extends State<LoginPage> {
       MaterialPageRoute(builder: (_) => const RegistrationPage()),
     );
     if (registration != null && mounted) {
-      _username.text = registration.email;
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute(
-          builder: (_) => WelcomePage(fullName: registration.fullName),
-        ),
-      );
-      if (mounted) {
+      try {
+        await widget.onCreateAccount(registration);
+        if (!mounted) return;
+        _username.text = registration.email;
+        await Navigator.of(context).push<void>(
+          MaterialPageRoute(
+            builder: (_) => WelcomePage(fullName: registration.fullName),
+          ),
+        );
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'L’inscription n’a pas été envoyée : service Digitalyx non connecté.',
+              'Compte créé. Consultez votre e-mail pour recevoir le mot de passe temporaire.',
             ),
             behavior: SnackBarBehavior.floating,
           ),
         );
+      } on DigitalyxApiException catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(error.message)));
+        }
+      } on TimeoutException {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Le serveur met trop de temps à répondre.'),
+            ),
+          );
+        }
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              duration: const Duration(seconds: 10),
+              content: Text('Erreur de création du compte : $error'),
+            ),
+          );
+          debugPrint('Erreur création compte Digitalyx: $error');
+        }
       }
     }
   }
 }
 
-Widget _atSignButton(TextEditingController controller) => IconButton(
-  onPressed: () => _insertEmailText(controller, '@'),
-  tooltip: 'Insérer @',
-  color: _brand,
-  icon: const Text(
-    '@',
-    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+Widget _gmailSuffix(TextEditingController controller) => TextButton(
+  onPressed: () => _insertEmailText(controller, '@gmail.com'),
+  style: TextButton.styleFrom(
+    foregroundColor: _brand,
+    padding: const EdgeInsets.symmetric(horizontal: 5),
+    minimumSize: const Size(0, 40),
+    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
   ),
-);
-
-Widget _emailSuffix(TextEditingController controller) => Row(
-  mainAxisSize: MainAxisSize.min,
-  children: [
-    _atSignButton(controller),
-    TextButton(
-      onPressed: () => _insertEmailText(controller, '@gmail.com'),
-      style: TextButton.styleFrom(
-        foregroundColor: _brand,
-        padding: const EdgeInsets.symmetric(horizontal: 5),
-        minimumSize: const Size(0, 40),
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
-      child: const Text(
-        '@gmail.com',
-        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
-      ),
-    ),
-  ],
+  child: const Text(
+    '@gmail.com',
+    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
+  ),
 );
 
 void _insertEmailText(TextEditingController controller, String insertedText) {
@@ -736,15 +1012,11 @@ class RegistrationData {
   const RegistrationData({
     required this.fullName,
     required this.email,
-    required this.company,
-    required this.position,
     required this.phone,
   });
 
   final String fullName;
   final String email;
-  final String company;
-  final String position;
   final String phone;
 }
 
@@ -759,23 +1031,13 @@ class _RegistrationPageState extends State<RegistrationPage> {
   final _formKey = GlobalKey<FormState>();
   final _fullName = TextEditingController();
   final _email = TextEditingController();
-  final _company = TextEditingController();
-  final _position = TextEditingController();
   final _phone = TextEditingController();
-  final _password = TextEditingController();
-  final _confirmPassword = TextEditingController();
-  bool _obscurePassword = true;
-  bool _obscureConfirmPassword = true;
 
   @override
   void dispose() {
     _fullName.dispose();
     _email.dispose();
-    _company.dispose();
-    _position.dispose();
     _phone.dispose();
-    _password.dispose();
-    _confirmPassword.dispose();
     super.dispose();
   }
 
@@ -787,8 +1049,6 @@ class _RegistrationPageState extends State<RegistrationPage> {
       RegistrationData(
         fullName: _fullName.text.trim(),
         email: _email.text.trim(),
-        company: _company.text.trim(),
-        position: _position.text.trim(),
         phone: _phone.text.trim(),
       ),
     );
@@ -831,13 +1091,13 @@ class _RegistrationPageState extends State<RegistrationPage> {
                 ),
                 const SizedBox(height: 6),
                 const Text(
-                  'Renseignez les informations de votre profil.',
+                  'Digitalyx enverra vos identifiants temporaires à cette adresse e-mail.',
                   style: TextStyle(color: _muted, fontSize: 13),
                 ),
                 const SizedBox(height: 20),
                 _registrationField(
                   controller: _fullName,
-                  label: 'Nom complet',
+                  label: 'Nom de l’entreprise ou du client',
                   icon: Icons.person_outline_rounded,
                   textCapitalization: TextCapitalization.words,
                 ),
@@ -848,21 +1108,6 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   icon: Icons.mail_outline_rounded,
                   keyboardType: TextInputType.emailAddress,
                   validator: _emailValidator,
-                  suffix: _emailSuffix(_email),
-                ),
-                const SizedBox(height: 12),
-                _registrationField(
-                  controller: _company,
-                  label: 'Entreprise',
-                  icon: Icons.business_outlined,
-                  textCapitalization: TextCapitalization.words,
-                ),
-                const SizedBox(height: 12),
-                _registrationField(
-                  controller: _position,
-                  label: 'Poste',
-                  icon: Icons.badge_outlined,
-                  textCapitalization: TextCapitalization.words,
                 ),
                 const SizedBox(height: 12),
                 _registrationField(
@@ -871,58 +1116,6 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   icon: Icons.phone_outlined,
                   keyboardType: TextInputType.phone,
                   validator: _phoneValidator,
-                ),
-                const SizedBox(height: 12),
-                _registrationField(
-                  controller: _password,
-                  label: 'Mot de passe',
-                  icon: Icons.lock_outline_rounded,
-                  obscureText: _obscurePassword,
-                  validator: _passwordValidator,
-                  suffix: IconButton(
-                    onPressed: () =>
-                        setState(() => _obscurePassword = !_obscurePassword),
-                    color: _muted,
-                    icon: Icon(
-                      _obscurePassword
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                      size: 19,
-                    ),
-                    tooltip: _obscurePassword
-                        ? 'Afficher le mot de passe'
-                        : 'Masquer le mot de passe',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _registrationField(
-                  controller: _confirmPassword,
-                  label: 'Confirmer le mot de passe',
-                  icon: Icons.lock_outline_rounded,
-                  obscureText: _obscureConfirmPassword,
-                  validator: (value) {
-                    final error = _passwordValidator(value);
-                    if (error != null) return error;
-                    if (value != _password.text) {
-                      return 'Les mots de passe ne correspondent pas';
-                    }
-                    return null;
-                  },
-                  suffix: IconButton(
-                    onPressed: () => setState(
-                      () => _obscureConfirmPassword = !_obscureConfirmPassword,
-                    ),
-                    color: _muted,
-                    icon: Icon(
-                      _obscureConfirmPassword
-                          ? Icons.visibility_outlined
-                          : Icons.visibility_off_outlined,
-                      size: 19,
-                    ),
-                    tooltip: _obscureConfirmPassword
-                        ? 'Afficher le mot de passe'
-                        : 'Masquer le mot de passe',
-                  ),
                 ),
                 const SizedBox(height: 22),
                 SizedBox(
@@ -956,8 +1149,7 @@ class _RegistrationPageState extends State<RegistrationPage> {
                 ),
                 const SizedBox(height: 14),
                 const Text(
-                  'Le service de création de compte n’est pas encore connecté. '
-                  'La validation de ce formulaire ne transmet aucune donnée.',
+                  'Après création, consultez votre e-mail. Le mot de passe temporaire devra être changé à la première connexion.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: _muted, fontSize: 11, height: 1.4),
                 ),
@@ -1296,25 +1488,171 @@ class _AmbientGlow extends StatelessWidget {
   );
 }
 
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1100),
+  )..forward();
+  late final Animation<double> _entrance = CurvedAnimation(
+    parent: _controller,
+    curve: Curves.easeOutCubic,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: _brandDark,
+    body: Stack(
+      fit: StackFit.expand,
+      children: [
+        const DecoratedBox(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [_brandDark, _brandDeep, _brand],
+              stops: [0, 0.58, 1],
+            ),
+          ),
+        ),
+        Positioned(
+          top: -145,
+          right: -115,
+          child: _AmbientGlow(
+            size: 330,
+            color: Colors.white.withValues(alpha: 0.07),
+          ),
+        ),
+        Positioned(
+          bottom: -170,
+          left: -120,
+          child: _AmbientGlow(
+            size: 360,
+            color: _accent.withValues(alpha: 0.15),
+          ),
+        ),
+        SafeArea(
+          child: FadeTransition(
+            opacity: _entrance,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.88, end: 1).animate(_entrance),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Column(
+                  children: [
+                    const Spacer(),
+                    Container(
+                      width: 132,
+                      height: 132,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withValues(alpha: 0.08),
+                        border: Border.all(
+                          color: Colors.white.withValues(alpha: 0.28),
+                          width: 1.2,
+                        ),
+                      ),
+                      child: const Center(
+                        child: SizedBox(
+                          width: 92,
+                          height: 92,
+                          child: _BrandMark(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 28),
+                    const Text(
+                      'Digitalyx',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 40,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.8,
+                      ),
+                    ),
+                    const SizedBox(height: 7),
+                    const Text(
+                      'EXHIBITOR',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 6,
+                      ),
+                    ),
+                    const SizedBox(height: 25),
+                    Container(
+                      width: 44,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: _accent,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ),
+                    const Spacer(),
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12),
+                      child: Text(
+                        'Réalisé par INOVYX TECH',
+                        style: TextStyle(
+                          color: Colors.white54,
+                          fontSize: 9,
+                          letterSpacing: 1.2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
 class HomePage extends StatelessWidget {
   const HomePage({
     super.key,
     required this.events,
     required this.leads,
+    required this.userName,
     required this.onCapture,
-    required this.onScan,
     required this.onEvents,
     required this.onLeads,
     required this.onProfile,
+    required this.onSaveProgramme,
+    required this.onPriority,
+    required this.onExecutivePosition,
+    required this.onOpenEvent,
   });
 
   final List<EventItem> events;
   final List<LeadItem> leads;
+  final String userName;
   final VoidCallback onCapture;
-  final VoidCallback onScan;
   final VoidCallback onEvents;
   final VoidCallback onLeads;
   final VoidCallback onProfile;
+  final Future<void> Function(int eventId, String programme) onSaveProgramme;
+  final ValueChanged<String> onPriority;
+  final ValueChanged<String> onExecutivePosition;
+  final ValueChanged<EventItem> onOpenEvent;
 
   @override
   Widget build(BuildContext context) {
@@ -1325,7 +1663,7 @@ class HomePage extends StatelessWidget {
       children: [
         Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -1340,7 +1678,7 @@ class HomePage extends StatelessWidget {
                   ),
                   SizedBox(height: 6),
                   Text(
-                    'Bonjour, exposant 👋',
+                    'Hello $userName 👋',
                     style: TextStyle(
                       fontSize: 23,
                       fontWeight: FontWeight.w800,
@@ -1355,7 +1693,7 @@ class HomePage extends StatelessWidget {
               borderRadius: BorderRadius.circular(28),
               child: const CircleAvatar(
                 backgroundColor: _brandTint,
-                child: Icon(Icons.eco_outlined, color: _brand),
+                child: Icon(Icons.person_outline, color: _brand),
               ),
             ),
           ],
@@ -1372,12 +1710,16 @@ class HomePage extends StatelessWidget {
             children: [
               Icon(Icons.cloud_off_outlined, size: 17, color: _brand),
               SizedBox(width: 7),
-              Text(
-                'Mode hors ligne · données enregistrées sur l’appareil',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: _brand,
-                  fontWeight: FontWeight.w600,
+              Flexible(
+                child: Text(
+                  'Mode hors ligne · données enregistrées sur l’appareil',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: _brand,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
@@ -1390,15 +1732,15 @@ class HomePage extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
             decoration: BoxDecoration(
-              color: const Color(0xFFFFF8E5),
+              color: const Color(0xFFFFF0EC),
               borderRadius: BorderRadius.circular(17),
-              border: Border.all(color: const Color(0xFFF0E6C9)),
+              border: Border.all(color: const Color(0xFFF4D5CF)),
             ),
             child: const Row(
               children: [
                 Icon(
                   Icons.workspace_premium_outlined,
-                  color: Color(0xFFA77C17),
+                  color: Color(0xFFE46C3C),
                   size: 20,
                 ),
                 SizedBox(width: 9),
@@ -1424,7 +1766,14 @@ class HomePage extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         if (event != null)
-          _EventHero(event: event)
+          _EventHero(
+            event: event,
+            leadCount: leads.where((lead) => lead.eventId == event.id).length,
+            onCapture: onCapture,
+            onLeads: onLeads,
+            onSaveProgramme: onSaveProgramme,
+            onOpenEvent: () => onOpenEvent(event),
+          )
         else
           _EmptyEventCard(onTap: onEvents),
         const SizedBox(height: 20),
@@ -1433,7 +1782,7 @@ class HomePage extends StatelessWidget {
             Expanded(
               child: _MetricCard(
                 value: '${leads.length}',
-                title: 'Prospects',
+                title: 'Visiteurs',
                 icon: Icons.people_alt_outlined,
                 tint: const Color(0xFFE8F2F5),
                 onTap: onLeads,
@@ -1442,57 +1791,25 @@ class HomePage extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: _MetricCard(
-                value: '$hot',
-                title: 'À traiter vite',
-                icon: Icons.bolt,
+                value: '${events.length}',
+                title: '\u00C9v\u00E9nements',
+                icon: Icons.event_available_outlined,
                 tint: const Color(0xFFFFF0DB),
-                onTap: onLeads,
+                onTap: onEvents,
               ),
             ),
           ],
         ),
         const SizedBox(height: 14),
-        _LeadBreakdown(leads: leads),
-        const SizedBox(height: 22),
-        const Text(
-          'CAPTER UN CONTACT',
-          style: TextStyle(
-            fontSize: 11,
-            letterSpacing: 1.5,
-            fontWeight: FontWeight.w800,
-            color: _muted,
-          ),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: _ActionTile(
-                icon: Icons.qr_code_scanner_rounded,
-                title: 'Scanner un badge',
-                subtitle: 'Lire un QR code',
-                color: _brandTint,
-                onTap: onScan,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _ActionTile(
-                icon: Icons.person_add_alt_1,
-                title: 'Saisie manuelle',
-                subtitle: 'Ajouter un visiteur',
-                color: const Color(0xFFEAF0F6),
-                onTap: onCapture,
-              ),
-            ),
-          ],
-        ),
+        _LeadBreakdown(leads: leads, onSelectPriority: onPriority),
+        const SizedBox(height: 12),
+        _PositionBreakdown(leads: leads, onSelectPosition: onExecutivePosition),
         const SizedBox(height: 22),
         Row(
           children: [
-            const Expanded(
+            Expanded(
               child: Text(
-                'Derniers prospects',
+                'Derniers événements',
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w800,
@@ -1500,24 +1817,63 @@ class HomePage extends StatelessWidget {
                 ),
               ),
             ),
-            TextButton(onPressed: onLeads, child: const Text('Tout voir')),
+            TextButton(onPressed: onEvents, child: const Text('Tout voir')),
           ],
         ),
-        if (leads.isEmpty)
+        if (events.isEmpty)
           const _EmptyHint(
-            icon: Icons.inbox_outlined,
-            text: 'Vos nouveaux contacts apparaîtront ici.',
+            icon: Icons.event_outlined,
+            text: 'Aucun evenement enregistre pour le moment.',
           )
         else
-          ...leads.take(3).map((lead) => LeadCard(lead: lead)),
+          ...events
+              .take(3)
+              .map(
+                (event) => Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: _line),
+                  ),
+                  child: ListTile(
+                    minVerticalPadding: 12,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 4,
+                    ),
+                    onTap: onEvents,
+                    leading: const CircleAvatar(
+                      backgroundColor: _brandTint,
+                      child: Icon(Icons.event_outlined, color: _brand),
+                    ),
+                    title: Text(
+                      event.name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: _ink,
+                      ),
+                    ),
+                    subtitle: Text(
+                      '${event.city} - ${_shortDate(event.startDate)}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: const Icon(Icons.chevron_right, color: _muted),
+                  ),
+                ),
+              ),
       ],
     );
   }
 }
 
 class _LeadBreakdown extends StatelessWidget {
-  const _LeadBreakdown({required this.leads});
+  const _LeadBreakdown({required this.leads, required this.onSelectPriority});
   final List<LeadItem> leads;
+  final ValueChanged<String> onSelectPriority;
 
   @override
   Widget build(BuildContext context) {
@@ -1534,37 +1890,161 @@ class _LeadBreakdown extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: _StatValue(
-              value: '$hot',
-              label: 'Chaud',
-              color: const Color(0xFFC64F36),
+            child: InkWell(
+              onTap: () => onSelectPriority('Chaud'),
+              borderRadius: BorderRadius.circular(12),
+              child: _StatValue(
+                value: '$hot',
+                label: 'Chaud',
+                color: const Color(0xFFC64F36),
+              ),
             ),
           ),
           Expanded(
-            child: _StatValue(
-              value: '$warm',
-              label: 'Tiède',
-              color: const Color(0xFFB77A1B),
+            child: InkWell(
+              onTap: () => onSelectPriority('Tiède'),
+              borderRadius: BorderRadius.circular(12),
+              child: _StatValue(
+                value: '$warm',
+                label: 'Tiède',
+                color: const Color(0xFFB77A1B),
+              ),
             ),
           ),
           Expanded(
-            child: _StatValue(
-              value: '$info',
-              label: 'Info',
-              color: const Color(0xFF517B99),
-            ),
-          ),
-          Expanded(
-            child: _StatValue(
-              value: '${leads.length}',
-              label: 'Total',
-              color: _brand,
+            child: InkWell(
+              onTap: () => onSelectPriority('Info'),
+              borderRadius: BorderRadius.circular(12),
+              child: _StatValue(
+                value: '$info',
+                label: 'Info',
+                color: const Color(0xFF517B99),
+              ),
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _PositionBreakdown extends StatelessWidget {
+  const _PositionBreakdown({
+    required this.leads,
+    required this.onSelectPosition,
+  });
+  final List<LeadItem> leads;
+  final ValueChanged<String> onSelectPosition;
+
+  @override
+  Widget build(BuildContext context) {
+    int countFor(String code, List<String> titles) => leads
+        .where((lead) => _matchesExecutivePosition(lead, code, titles))
+        .length;
+
+    Widget positionCard(String code, List<String> titles) => Expanded(
+      child: InkWell(
+        onTap: () => onSelectPosition(code),
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _line),
+          ),
+          child: _StatValue(
+            value: '${countFor(code, titles)}',
+            label: code,
+            color: _brand,
+          ),
+        ),
+      ),
+    );
+
+    return Row(
+      children: [
+        positionCard('DM', const [
+          'directeur marketing',
+          'directrice marketing',
+        ]),
+        const SizedBox(width: 8),
+        positionCard('DG', const ['directeur general', 'directrice generale']),
+        const SizedBox(width: 8),
+        positionCard('DC', const [
+          'directeur commercial',
+          'directrice commerciale',
+        ]),
+      ],
+    );
+  }
+}
+
+String _normalizeExecutivePosition(String value) => value
+    .toLowerCase()
+    .replaceAll('é', 'e')
+    .replaceAll('è', 'e')
+    .replaceAll('ê', 'e')
+    .replaceAll('ë', 'e')
+    .replaceAll('à', 'a')
+    .replaceAll('â', 'a')
+    .replaceAll('î', 'i')
+    .replaceAll('ï', 'i')
+    .replaceAll('ô', 'o')
+    .replaceAll('ù', 'u')
+    .replaceAll('û', 'u')
+    .replaceAll('ç', 'c')
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .trim();
+
+const _positionFilterDm = '@DM';
+const _positionFilterDg = '@DG';
+const _positionFilterDc = '@DC';
+
+String _executivePositionFilter(String code) => switch (code) {
+  'DM' => _positionFilterDm,
+  'DG' => _positionFilterDg,
+  'DC' => _positionFilterDc,
+  _ => code,
+};
+
+String _executivePositionFilterLabel(String filter) => switch (filter) {
+  _positionFilterDm => 'Direction marketing (DM)',
+  _positionFilterDg => 'Direction générale (DG)',
+  _positionFilterDc => 'Direction commerciale (DC)',
+  _ => filter,
+};
+
+bool _matchesExecutivePosition(
+  LeadItem lead,
+  String code,
+  List<String> titles,
+) {
+  final position = _normalizeExecutivePosition(lead.position);
+  final codeMatch = RegExp('\\b${code.toLowerCase()}\\b').hasMatch(position);
+  return codeMatch || titles.any(position.contains);
+}
+
+bool _matchesPositionFilter(LeadItem lead, String filter) {
+  if (filter == _positionFilterDm) {
+    return _matchesExecutivePosition(lead, 'DM', const [
+      'directeur marketing',
+      'directrice marketing',
+    ]);
+  }
+  if (filter == _positionFilterDg) {
+    return _matchesExecutivePosition(lead, 'DG', const [
+      'directeur general',
+      'directrice generale',
+    ]);
+  }
+  if (filter == _positionFilterDc) {
+    return _matchesExecutivePosition(lead, 'DC', const [
+      'directeur commercial',
+      'directrice commerciale',
+    ]);
+  }
+  return lead.position.trim() == filter;
 }
 
 class _StatValue extends StatelessWidget {
@@ -1595,92 +2075,395 @@ class _StatValue extends StatelessWidget {
 }
 
 class _EventHero extends StatelessWidget {
-  const _EventHero({required this.event});
+  const _EventHero({
+    required this.event,
+    required this.leadCount,
+    required this.onCapture,
+    required this.onLeads,
+    required this.onSaveProgramme,
+    required this.onOpenEvent,
+  });
   final EventItem event;
+  final int leadCount;
+  final VoidCallback onCapture;
+  final VoidCallback onLeads;
+  final Future<void> Function(int eventId, String programme) onSaveProgramme;
+  final VoidCallback onOpenEvent;
 
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.all(20),
-    decoration: BoxDecoration(
+  Widget build(BuildContext context) => Material(
+    color: Colors.transparent,
+    child: InkWell(
+      onTap: onOpenEvent,
       borderRadius: BorderRadius.circular(24),
-      gradient: const LinearGradient(
-        colors: [_brandDeep, _brandBright],
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
+      child: Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(24),
+          gradient: const LinearGradient(
+            colors: [_brandDeep, _brandBright],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.event_available, color: _accent, size: 17),
+                const SizedBox(width: 7),
+                Text(
+                  event.isLocal ? 'MON ÉVÉNEMENT' : 'ÉVÉNEMENT',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    letterSpacing: 1.3,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const Spacer(),
+                const Icon(Icons.cloud_off, color: Colors.white70, size: 15),
+                const SizedBox(width: 5),
+                const Text(
+                  'local',
+                  style: TextStyle(color: Colors.white70, fontSize: 11),
+                ),
+                const SizedBox(width: 6),
+                const Icon(
+                  Icons.chevron_right,
+                  color: Colors.white70,
+                  size: 18,
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Text(
+              event.name,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(
+                  Icons.location_on_outlined,
+                  size: 16,
+                  color: Colors.white70,
+                ),
+                const SizedBox(width: 4),
+                Text(event.city, style: const TextStyle(color: Colors.white70)),
+                const SizedBox(width: 13),
+                const Icon(
+                  Icons.confirmation_number_outlined,
+                  size: 16,
+                  color: Colors.white70,
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  'Stand ${event.stand.isEmpty ? '—' : event.stand}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Divider(color: Colors.white24, height: 1),
+            const SizedBox(height: 11),
+            Row(
+              children: [
+                const Icon(
+                  Icons.calendar_month_outlined,
+                  size: 15,
+                  color: _accent,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  '${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: () => showModalBottomSheet<void>(
+                  context: context,
+                  showDragHandle: true,
+                  isScrollControlled: true,
+                  backgroundColor: Colors.white,
+                  builder: (_) => _EventGuideSheet(
+                    event: event,
+                    leadCount: leadCount,
+                    onCapture: onCapture,
+                    onLeads: onLeads,
+                    onSaveProgramme: onSaveProgramme,
+                  ),
+                ),
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                icon: const Icon(Icons.menu_book_outlined, size: 17),
+                label: const Text('Ouvrir le guide du salon'),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
+  );
+}
+
+class _EventGuideSheet extends StatelessWidget {
+  const _EventGuideSheet({
+    required this.event,
+    required this.leadCount,
+    required this.onCapture,
+    required this.onLeads,
+    required this.onSaveProgramme,
+  });
+
+  final EventItem event;
+  final int leadCount;
+  final VoidCallback onCapture;
+  final VoidCallback onLeads;
+  final Future<void> Function(int eventId, String programme) onSaveProgramme;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(22, 4, 22, 24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'GUIDE DE L’ÉVÉNEMENT',
+            style: TextStyle(
+              color: _brand,
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.4,
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            event.name,
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 23,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 18),
+          _GuideInfoRow(
+            icon: Icons.calendar_month_outlined,
+            label: 'Dates',
+            value:
+                '${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
+          ),
+          const SizedBox(height: 13),
+          _GuideInfoRow(
+            icon: Icons.location_on_outlined,
+            label: 'Ville',
+            value: event.city,
+          ),
+          const SizedBox(height: 13),
+          _GuideInfoRow(
+            icon: Icons.confirmation_number_outlined,
+            label: 'Votre stand',
+            value: event.stand.isEmpty ? 'À préciser' : event.stand,
+          ),
+          const SizedBox(height: 17),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Programme du salon',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: () => _editProgramme(context),
+                icon: Icon(
+                  event.programme.isEmpty
+                      ? Icons.add_rounded
+                      : Icons.edit_outlined,
+                  size: 16,
+                ),
+                label: Text(event.programme.isEmpty ? 'Ajouter' : 'Modifier'),
+              ),
+            ],
+          ),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF0EC),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFFF4D5CF)),
+            ),
+            child: Text(
+              event.programme.isEmpty
+                  ? 'Ajoutez les rendez-vous, conférences ou temps forts à retenir.'
+                  : event.programme,
+              style: TextStyle(
+                color: event.programme.isEmpty ? _muted : _ink,
+                fontSize: 13,
+                height: 1.45,
+              ),
+            ),
+          ),
+          const SizedBox(height: 17),
+          Container(
+            padding: const EdgeInsets.all(15),
+            decoration: BoxDecoration(
+              color: _brandTint,
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.people_alt_outlined, color: _brand),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Vos contacts',
+                        style: TextStyle(
+                          color: _ink,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      Text(
+                        '$leadCount visiteur${leadCount == 1 ? '' : 's'} enregistré${leadCount == 1 ? '' : 's'}',
+                        style: const TextStyle(color: _muted, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 17),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                onCapture();
+              },
+              icon: const Icon(Icons.qr_code_scanner_rounded),
+              label: const Text('Scanner ou ajouter un contact'),
+            ),
+          ),
+          SizedBox(
+            width: double.infinity,
+            child: TextButton.icon(
+              onPressed: () {
+                Navigator.pop(context);
+                onLeads();
+              },
+              icon: const Icon(Icons.list_alt_rounded),
+              label: const Text('Consulter mes visiteurs'),
+            ),
+          ),
+          const Center(
+            child: Text(
+              'Vos données restent enregistrées sur cet appareil.',
+              style: TextStyle(color: _mutedSoft, fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Future<void> _editProgramme(BuildContext context) async {
+    final controller = TextEditingController(text: event.programme);
+    final programme = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Programme du salon'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 4,
+          maxLines: 8,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+            hintText:
+                'Ex. 10 h — ouverture du stand\n14 h — démonstration produit',
+            alignLabelWithHint: true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (programme == null || !context.mounted) return;
+    await onSaveProgramme(event.id, programme);
+    if (context.mounted) Navigator.pop(context);
+  }
+}
+
+class _GuideInfoRow extends StatelessWidget {
+  const _GuideInfoRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [
+      Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: _brandTint,
+          borderRadius: BorderRadius.circular(13),
+        ),
+        child: Icon(icon, color: _brand, size: 19),
+      ),
+      const SizedBox(width: 12),
+      Expanded(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Icon(Icons.event_available, color: _lime, size: 17),
-            const SizedBox(width: 7),
+            Text(label, style: const TextStyle(color: _muted, fontSize: 11)),
+            const SizedBox(height: 2),
             Text(
-              event.isLocal ? 'MON ÉVÉNEMENT' : 'ÉVÉNEMENT',
+              value,
               style: const TextStyle(
-                color: Colors.white70,
-                letterSpacing: 1.3,
-                fontSize: 10,
+                color: _ink,
+                fontSize: 14,
                 fontWeight: FontWeight.w700,
               ),
             ),
-            const Spacer(),
-            const Icon(Icons.cloud_off, color: Colors.white70, size: 15),
-            const SizedBox(width: 5),
-            const Text(
-              'local',
-              style: TextStyle(color: Colors.white70, fontSize: 11),
-            ),
           ],
         ),
-        const SizedBox(height: 14),
-        Text(
-          event.name,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 22,
-            fontWeight: FontWeight.w800,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            const Icon(
-              Icons.location_on_outlined,
-              size: 16,
-              color: Colors.white70,
-            ),
-            const SizedBox(width: 4),
-            Text(event.city, style: const TextStyle(color: Colors.white70)),
-            const SizedBox(width: 13),
-            const Icon(
-              Icons.confirmation_number_outlined,
-              size: 16,
-              color: Colors.white70,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              'Stand ${event.stand.isEmpty ? '—' : event.stand}',
-              style: const TextStyle(color: Colors.white70),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        const Divider(color: Colors.white24, height: 1),
-        const SizedBox(height: 11),
-        Row(
-          children: [
-            const Icon(Icons.calendar_month_outlined, size: 15, color: _lime),
-            const SizedBox(width: 7),
-            Text(
-              '${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
-              style: const TextStyle(color: Colors.white, fontSize: 12),
-            ),
-          ],
-        ),
-      ],
-    ),
+      ),
+    ],
   );
 }
 
@@ -1821,7 +2604,7 @@ class LeadsPage extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     children: [
       _PageHeader(
-        title: 'Prospects',
+        title: 'Visiteurs',
         subtitle:
             '${leads.length} contact${leads.length == 1 ? '' : 's'} enregistré${leads.length == 1 ? '' : 's'}',
         action: IconButton.filledTonal(
@@ -1847,11 +2630,11 @@ class LeadsPage extends StatelessWidget {
             ? _EmptyHint(
                 icon: Icons.person_search_outlined,
                 text:
-                    'Aucun prospect pour le moment. Ajoutez votre premier contact.',
+                    'Aucun visiteur pour le moment. Ajoutez votre premier contact.',
                 action: FilledButton.icon(
                   onPressed: onCapture,
                   icon: const Icon(Icons.person_add_alt_1),
-                  label: const Text('Ajouter un prospect'),
+                  label: const Text('Ajouter un visiteur'),
                 ),
               )
             : ListView(
@@ -2196,6 +2979,10 @@ class LeadCard extends StatelessWidget {
               style: const TextStyle(fontSize: 12, color: _muted),
             ),
           ],
+          if (lead.voiceNote case final voiceNote?) ...[
+            const SizedBox(height: 8),
+            VoiceNotePlayer(audio: voiceNote),
+          ],
           if (event != null) ...[
             const SizedBox(height: 10),
             Text(
@@ -2214,256 +3001,608 @@ class LeadCard extends StatelessWidget {
   }
 }
 
-class EventsPage extends StatelessWidget {
-  const EventsPage({
-    super.key,
-    required this.events,
-    required this.onCreate,
-    required this.onJoin,
-  });
-  final List<EventItem> events;
-  final Future<void> Function({
-    required String name,
-    required String city,
-    required String startDate,
-    required String endDate,
-    required String stand,
-  })
-  onCreate;
-  final Future<void> Function(EventItem event, String stand) onJoin;
+class VoiceNotePlayer extends StatefulWidget {
+  const VoiceNotePlayer({super.key, required this.audio});
 
-  Future<void> _newEvent(BuildContext context) async {
-    final result = await showModalBottomSheet<_NewEventData>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: _paper,
-      builder: (_) => const _EventFormSheet(),
-    );
-    if (result != null) {
-      EventItem? duplicate;
-      for (final event in events) {
-        if (_normalize(event.name) == _normalize(result.name) &&
-            _normalize(event.city) == _normalize(result.city) &&
-            event.startDate == result.startDate &&
-            event.endDate == result.endDate) {
-          duplicate = event;
-          break;
-        }
-      }
-      if (duplicate != null && context.mounted) {
-        await _join(context, duplicate);
-      } else {
-        await onCreate(
-          name: result.name,
-          city: result.city,
-          startDate: result.startDate,
-          endDate: result.endDate,
-          stand: result.stand,
-        );
-        if (context.mounted) {
-          _message(
-            context,
-            'Événement créé localement. Le rapprochement avec le salon officiel attend le serveur.',
-          );
-        }
-      }
+  final Uint8List audio;
+
+  @override
+  State<VoiceNotePlayer> createState() => _VoiceNotePlayerState();
+}
+
+class _VoiceNotePlayerState extends State<VoiceNotePlayer> {
+  final AudioPlayer _player = AudioPlayer();
+  StreamSubscription<void>? _completionSubscription;
+  bool _playing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _completionSubscription = _player.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _playing = false);
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant VoiceNotePlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.audio, widget.audio)) {
+      unawaited(_player.stop());
+      _playing = false;
     }
   }
 
-  Future<void> _join(BuildContext context, EventItem event) async {
-    final controller = TextEditingController(text: event.stand);
-    final stand = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Rejoindre ${event.name}'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(labelText: 'Numéro de stand'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Annuler'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Enregistrer'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (stand != null) {
-      await onJoin(event, stand);
-      if (context.mounted) {
-        _message(context, 'Stand mis à jour sur cet appareil.');
+  @override
+  void dispose() {
+    _completionSubscription?.cancel();
+    unawaited(_player.dispose());
+    super.dispose();
+  }
+
+  Future<void> _togglePlayback() async {
+    if (_playing) {
+      await _player.stop();
+      if (mounted) setState(() => _playing = false);
+      return;
+    }
+    try {
+      await _player.play(
+        BytesSource(_voiceNoteWav(widget.audio), mimeType: 'audio/wav'),
+      );
+      if (mounted) setState(() => _playing = true);
+    } catch (error) {
+      if (mounted) {
+        _message(context, 'Lecture de la note vocale impossible : $error');
       }
     }
   }
 
   @override
+  Widget build(BuildContext context) => OutlinedButton.icon(
+    onPressed: _togglePlayback,
+    icon: Icon(
+      _playing ? Icons.stop_circle_outlined : Icons.play_circle_outline,
+    ),
+    label: Text(_playing ? 'Arrêter la note vocale' : 'Écouter la note vocale'),
+    style: OutlinedButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    ),
+  );
+}
+
+Uint8List _voiceNoteWav(Uint8List pcm) {
+  const sampleRate = 16000;
+  const channels = 1;
+  const bitsPerSample = 16;
+  final bytesPerSecond = sampleRate * channels * bitsPerSample ~/ 8;
+  final wav = Uint8List(44 + pcm.length);
+  final header = ByteData.sublistView(wav);
+  wav.setRange(0, 4, ascii.encode('RIFF'));
+  header.setUint32(4, 36 + pcm.length, Endian.little);
+  wav.setRange(8, 12, ascii.encode('WAVE'));
+  wav.setRange(12, 16, ascii.encode('fmt '));
+  header.setUint32(16, 16, Endian.little);
+  header.setUint16(20, 1, Endian.little);
+  header.setUint16(22, channels, Endian.little);
+  header.setUint32(24, sampleRate, Endian.little);
+  header.setUint32(28, bytesPerSecond, Endian.little);
+  header.setUint16(32, channels * bitsPerSample ~/ 8, Endian.little);
+  header.setUint16(34, bitsPerSample, Endian.little);
+  wav.setRange(36, 40, ascii.encode('data'));
+  header.setUint32(40, pcm.length, Endian.little);
+  wav.setRange(44, wav.length, pcm);
+  return wav;
+}
+
+class EventsPage extends StatelessWidget {
+  const EventsPage({
+    super.key,
+    required this.events,
+    required this.leads,
+    required this.onSaveLead,
+    required this.onOpenEvent,
+  });
+
+  final List<EventItem> events;
+  final List<LeadItem> leads;
+  final Future<List<LeadItem>> Function(LeadDraft draft) onSaveLead;
+  final ValueChanged<EventItem> onOpenEvent;
+
+  @override
   Widget build(BuildContext context) => Column(
     children: [
-      _PageHeader(
+      const _PageHeader(
         title: 'Événements',
-        subtitle: 'Salons et stands enregistrés localement',
-        action: IconButton.filledTonal(
-          onPressed: () => _newEvent(context),
-          icon: const Icon(Icons.add),
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(18, 0, 18, 14),
-        child: OutlinedButton.icon(
-          onPressed: () => _findEvent(context),
-          icon: const Icon(Icons.search),
-          label: const Text('Rechercher un salon connu'),
-          style: OutlinedButton.styleFrom(
-            minimumSize: const Size.fromHeight(50),
-            foregroundColor: _brand,
-            side: const BorderSide(color: _brandTintStrong),
-          ),
-        ),
+        subtitle: 'Événements enregistrés et visiteurs capturés',
       ),
       Expanded(
         child: events.isEmpty
-            ? _EmptyHint(
+            ? const _EmptyHint(
                 icon: Icons.event_note_outlined,
-                text:
-                    'Aucun événement enregistré. Créez votre salon temporaire ou recherchez un salon.',
+                text: 'Aucun événement enregistré pour le moment.',
               )
             : ListView(
                 padding: const EdgeInsets.fromLTRB(18, 0, 18, 24),
                 children: [
                   for (final event in events)
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.all(17),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: _line),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Container(
-                                width: 43,
-                                height: 43,
-                                decoration: BoxDecoration(
-                                  color: _brandTint,
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: const Icon(
-                                  Icons.event_available,
-                                  color: _brand,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  event.name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 16,
-                                    color: _ink,
-                                  ),
-                                ),
-                              ),
-                              const Icon(
-                                Icons.cloud_off,
-                                size: 16,
-                                color: _muted,
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 13),
-                          Text(
-                            '${event.city} · ${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
-                            style: const TextStyle(color: _muted, fontSize: 12),
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              _Tag(
-                                text:
-                                    'Stand ${event.stand.isEmpty ? 'à définir' : event.stand}',
-                              ),
-                              const Spacer(),
-                              TextButton.icon(
-                                onPressed: () => _join(context, event),
-                                icon: const Icon(Icons.edit_outlined, size: 16),
-                                label: const Text('Mon stand'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
+                    _EventSummaryCard(
+                      event: event,
+                      leads: leads
+                          .where((lead) => lead.eventId == event.id)
+                          .toList(),
+                      onTap: () => onOpenEvent(event),
                     ),
-                  const _PrototypeNote(
-                    text:
-                        'La recherche, le rapprochement avec un événement maître et la synchronisation nécessitent le serveur organisateur.',
-                  ),
                 ],
               ),
       ),
-      Padding(
-        padding: const EdgeInsets.fromLTRB(18, 0, 18, 16),
-        child: FilledButton.icon(
-          onPressed: () => _newEvent(context),
-          icon: const Icon(Icons.add),
-          label: const Text('Créer un événement local'),
-          style: FilledButton.styleFrom(
-            minimumSize: const Size.fromHeight(52),
-            backgroundColor: _brand,
-          ),
-        ),
-      ),
     ],
   );
+}
 
-  Future<void> _findEvent(BuildContext context) async {
-    final controller = TextEditingController();
-    final query = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Rechercher un salon'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Nom du salon'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Annuler'),
+class EventVisitorsPage extends StatefulWidget {
+  const EventVisitorsPage({
+    super.key,
+    required this.events,
+    required this.leads,
+    required this.selectedEventId,
+    this.initialPriority = 'Tout',
+    this.initialPositionFilter,
+    required this.onSaveLead,
+  });
+
+  final List<EventItem> events;
+  final List<LeadItem> leads;
+  final int? selectedEventId;
+  final String initialPriority;
+  final String? initialPositionFilter;
+  final Future<List<LeadItem>> Function(LeadDraft draft) onSaveLead;
+
+  @override
+  State<EventVisitorsPage> createState() => _EventVisitorsPageState();
+}
+
+class _EventVisitorsPageState extends State<EventVisitorsPage> {
+  static const _allPositions = 'Toutes les fonctions';
+
+  late int? _selectedEventId = widget.selectedEventId;
+  late List<LeadItem> _leads = List<LeadItem>.of(widget.leads);
+  late String _selectedPriority = widget.initialPriority;
+  late String _selectedPosition = widget.initialPositionFilter ?? _allPositions;
+  String _query = '';
+
+  Future<void> _addVisitor() async {
+    EventItem? event = _selectedEventId == null
+        ? null
+        : _eventFor(widget.events, _selectedEventId!);
+    if (event == null && widget.events.length == 1) {
+      event = widget.events.first;
+    } else if (event == null && widget.events.isNotEmpty) {
+      event = await showModalBottomSheet<EventItem>(
+        context: context,
+        backgroundColor: _paper,
+        builder: (context) => SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 18, 20, 8),
+                child: Text(
+                  'Choisir un événement',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+              ),
+              for (final item in widget.events)
+                ListTile(
+                  leading: const Icon(Icons.event_outlined, color: _brand),
+                  title: Text(item.name),
+                  subtitle: Text(item.city),
+                  onTap: () => Navigator.pop(context, item),
+                ),
+            ],
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Rechercher'),
+        ),
+      );
+    }
+    if (event == null || !mounted) return;
+
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => CapturePage(
+          event: event!,
+          onSave: (draft) async {
+            final updatedLeads = await widget.onSaveLead(draft);
+            if (mounted) setState(() => _leads = updatedLeads);
+          },
+          initialScan: true,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final availablePositions =
+        _leads
+            .where(
+              (lead) =>
+                  (_selectedEventId == null ||
+                      lead.eventId == _selectedEventId) &&
+                  lead.position.trim().isNotEmpty,
+            )
+            .map((lead) => lead.position.trim())
+            .toSet()
+            .toList()
+          ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    final visibleLeads = _leads.where((lead) {
+      final matchesEvent =
+          _selectedEventId == null || lead.eventId == _selectedEventId;
+      final matchesPriority =
+          _selectedPriority == 'Tout' || lead.priority == _selectedPriority;
+      final matchesPosition =
+          _selectedPosition == _allPositions ||
+          _matchesPositionFilter(lead, _selectedPosition);
+      final query = _normalize(_query);
+      final matchesQuery =
+          query.isEmpty ||
+          _normalize(
+            '${lead.name} ${lead.company} ${lead.email} ${lead.phone} ${lead.position}',
+          ).contains(query);
+      return matchesEvent && matchesPriority && matchesPosition && matchesQuery;
+    }).toList();
+    final selectedEvent = _eventFor(widget.events, _selectedEventId ?? -1);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          selectedEvent?.name ??
+              (_selectedPriority != 'Tout'
+                  ? 'Visiteurs $_selectedPriority'
+                  : _selectedPosition == _allPositions
+                  ? 'Tous les visiteurs'
+                  : 'Visiteurs · ${_executivePositionFilterLabel(_selectedPosition)}'),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _addVisitor,
+        tooltip: 'Ajouter un visiteur',
+        backgroundColor: _brandDark,
+        foregroundColor: Colors.white,
+        child: const Icon(Icons.add),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    onChanged: (value) => setState(() => _query = value),
+                    decoration: InputDecoration(
+                      hintText: 'Rechercher un visiteur',
+                      prefixIcon: const Icon(Icons.search),
+                      filled: true,
+                      fillColor: Colors.white,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: _line),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                        borderSide: const BorderSide(color: _line),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  height: 52,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border.all(color: _line),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: DropdownButton<int?>(
+                    value: _selectedEventId,
+                    underline: const SizedBox.shrink(),
+                    icon: const Icon(Icons.arrow_drop_down),
+                    hint: Text(_selectedEventId == null ? 'Tout' : 'Événement'),
+                    items: [
+                      const DropdownMenuItem<int?>(
+                        value: null,
+                        child: Text('Tout'),
+                      ),
+                      for (final event in widget.events)
+                        DropdownMenuItem<int?>(
+                          value: event.id,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 130),
+                            child: Text(
+                              event.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) => setState(() {
+                      _selectedEventId = value;
+                      _selectedPosition = _allPositions;
+                    }),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            height: 48,
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              scrollDirection: Axis.horizontal,
+              children: [
+                for (final priority in ['Tout', 'Chaud', 'Tiède', 'Info'])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 7),
+                    child: ChoiceChip(
+                      label: Text(priority),
+                      selected: _selectedPriority == priority,
+                      onSelected: (_) =>
+                          setState(() => _selectedPriority = priority),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: [
+                const Icon(Icons.work_outline, size: 18, color: _muted),
+                const SizedBox(width: 7),
+                const Text('Poste', style: TextStyle(color: _muted)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: DropdownButton<String>(
+                    isExpanded: true,
+                    value:
+                        availablePositions.contains(_selectedPosition) ||
+                            const {
+                              _positionFilterDm,
+                              _positionFilterDg,
+                              _positionFilterDc,
+                            }.contains(_selectedPosition)
+                        ? _selectedPosition
+                        : _allPositions,
+                    underline: const SizedBox.shrink(),
+                    items: [
+                      const DropdownMenuItem(
+                        value: _allPositions,
+                        child: Text(_allPositions),
+                      ),
+                      for (final filter in const [
+                        _positionFilterDm,
+                        _positionFilterDg,
+                        _positionFilterDc,
+                      ])
+                        DropdownMenuItem(
+                          value: filter,
+                          child: Text(_executivePositionFilterLabel(filter)),
+                        ),
+                      for (final position in availablePositions)
+                        DropdownMenuItem(
+                          value: position,
+                          child: Text(
+                            position,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) => setState(
+                      () => _selectedPosition = value ?? _allPositions,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 0, 18, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '${visibleLeads.length} visiteur${visibleLeads.length == 1 ? '' : 's'}',
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: visibleLeads.isEmpty
+                ? const _EmptyHint(
+                    icon: Icons.person_search_outlined,
+                    text: 'Aucun visiteur ne correspond à ces filtres.',
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(18, 4, 18, 24),
+                    itemCount: visibleLeads.length,
+                    itemBuilder: (context, index) {
+                      final lead = visibleLeads[index];
+                      return LeadCard(
+                        lead: lead,
+                        event: _eventFor(widget.events, lead.eventId),
+                      );
+                    },
+                  ),
           ),
         ],
       ),
     );
-    controller.dispose();
-    if (query == null || !context.mounted) return;
-    final matches = events
-        .where(
-          (event) =>
-              event.name.toLowerCase().contains(query.trim().toLowerCase()),
-        )
-        .toList();
-    if (matches.isEmpty) {
-      _message(
-        context,
-        'Aucun salon correspondant dans les événements déjà enregistrés sur cet appareil.',
-      );
-      return;
-    }
-    await _join(context, matches.first);
   }
+}
+
+class _EventSummaryCard extends StatelessWidget {
+  const _EventSummaryCard({
+    required this.event,
+    required this.leads,
+    required this.onTap,
+  });
+
+  final EventItem event;
+  final List<LeadItem> leads;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final hot = leads.where((lead) => lead.priority == 'Chaud').length;
+    final warm = leads.where((lead) => lead.priority == 'Tiède').length;
+    final info = leads.where((lead) => lead.priority == 'Info').length;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: _line),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: _brandTint,
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(Icons.event_available, color: _brand),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Text(
+                        event.name,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                          color: _ink,
+                        ),
+                      ),
+                    ),
+                    const Icon(Icons.chevron_right, color: _mutedSoft),
+                  ],
+                ),
+                const SizedBox(height: 13),
+                Text(
+                  '${event.city} · ${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Stand ${event.stand.isEmpty ? 'à définir' : event.stand}',
+                  style: const TextStyle(color: _muted, fontSize: 12),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _EventCountBadge(
+                        label: 'Visiteurs',
+                        count: leads.length,
+                        color: _brand,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: _EventCountBadge(
+                        label: 'Chaud',
+                        count: hot,
+                        color: const Color(0xFFC64F36),
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: _EventCountBadge(
+                        label: 'Tiède',
+                        count: warm,
+                        color: const Color(0xFFB77A1B),
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Expanded(
+                      child: _EventCountBadge(
+                        label: 'Info',
+                        count: info,
+                        color: const Color(0xFF517B99),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EventCountBadge extends StatelessWidget {
+  const _EventCountBadge({
+    required this.label,
+    required this.count,
+    required this.color,
+  });
+
+  final String label;
+  final int count;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 6),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.10),
+      borderRadius: BorderRadius.circular(12),
+    ),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w700,
+              fontSize: 10,
+            ),
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '$count',
+          style: TextStyle(
+            color: color,
+            fontWeight: FontWeight.w800,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 class _NewEventData {
@@ -2551,7 +3690,7 @@ class _EventFormSheetState extends State<_EventFormSheet> {
             TextFormField(
               controller: _city,
               validator: _required,
-              decoration: const InputDecoration(labelText: 'Ville'),
+              decoration: const InputDecoration(labelText: 'Lieu'),
             ),
             const SizedBox(height: 10),
             OutlinedButton.icon(
@@ -2615,9 +3754,32 @@ class ProfilePage extends StatelessWidget {
     super.key,
     required this.onMessage,
     required this.username,
+    required this.events,
+    required this.agents,
+    required this.onCreateAgent,
+    required this.onUpdateAgent,
+    required this.onDeleteAgent,
   });
   final ValueChanged<String> onMessage;
   final String username;
+  final List<EventItem> events;
+  final List<AgentItem> agents;
+  final Future<void> Function({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  })
+  onCreateAgent;
+  final Future<void> Function({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  })
+  onUpdateAgent;
+  final Future<void> Function(int id) onDeleteAgent;
 
   @override
   Widget build(BuildContext context) => ListView(
@@ -2673,6 +3835,28 @@ class ProfilePage extends StatelessWidget {
         ),
       ),
       const SizedBox(height: 13),
+      FilledButton.icon(
+        onPressed: events.isEmpty ? null : () => _manageAgents(context),
+        icon: const Icon(Icons.badge_outlined),
+        label: const Text('Mode Agent'),
+        style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
+      ),
+      if (agents.isNotEmpty) ...[
+        const SizedBox(height: 8),
+        Text(
+          '${agents.length} agent${agents.length == 1 ? '' : 's'} ajouté${agents.length == 1 ? '' : 's'}',
+          style: const TextStyle(color: _muted),
+        ),
+      ],
+      if (events.isEmpty)
+        const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: Text(
+            'Créez d’abord un événement pour ajouter un agent.',
+            style: TextStyle(color: _muted, fontSize: 12),
+          ),
+        ),
+      const SizedBox(height: 20),
       OutlinedButton.icon(
         onPressed: () => _accountDialog(context),
         icon: const Icon(Icons.mail_outline),
@@ -2715,6 +3899,21 @@ class ProfilePage extends StatelessWidget {
       ),
     ],
   );
+
+  Future<void> _manageAgents(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _AgentManagementSheet(
+        events: events,
+        agents: agents,
+        onCreateAgent: onCreateAgent,
+        onUpdateAgent: onUpdateAgent,
+        onDeleteAgent: onDeleteAgent,
+      ),
+    );
+  }
 
   void _showAnnualOffer(BuildContext context) {
     showDialog<void>(
@@ -2822,6 +4021,311 @@ class ProfilePage extends StatelessWidget {
   }
 }
 
+class _AgentManagementSheet extends StatefulWidget {
+  const _AgentManagementSheet({
+    required this.events,
+    required this.agents,
+    required this.onCreateAgent,
+    required this.onUpdateAgent,
+    required this.onDeleteAgent,
+  });
+
+  final List<EventItem> events;
+  final List<AgentItem> agents;
+  final Future<void> Function({
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  })
+  onCreateAgent;
+  final Future<void> Function({
+    required int id,
+    required String name,
+    required String email,
+    required String password,
+    required int eventId,
+  })
+  onUpdateAgent;
+  final Future<void> Function(int id) onDeleteAgent;
+
+  @override
+  State<_AgentManagementSheet> createState() => _AgentManagementSheetState();
+}
+
+class _AgentManagementSheetState extends State<_AgentManagementSheet> {
+  final _formKey = GlobalKey<FormState>();
+  final _name = TextEditingController();
+  final _email = TextEditingController();
+  final _password = TextEditingController();
+  int? _eventId;
+  AgentItem? _editingAgent;
+  bool _saving = false;
+  bool _showPassword = false;
+  @override
+  void dispose() {
+    _name.dispose();
+    _email.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  void _edit(AgentItem agent) {
+    setState(() {
+      _editingAgent = agent;
+      _name.text = agent.name;
+      _email.text = agent.email;
+      _password.text = agent.password;
+      _eventId = agent.eventId;
+      _showPassword = false;
+    });
+  }
+
+  Future<void> _delete(AgentItem agent) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Supprimer cet agent ?'),
+        content: Text('L’accès de ${agent.name} sera supprimé.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await widget.onDeleteAgent(agent.id);
+    if (mounted) Navigator.pop(context);
+  }
+
+  Future<void> _create() async {
+    if (!_formKey.currentState!.validate() || _eventId == null) return;
+    setState(() => _saving = true);
+    try {
+      final editing = _editingAgent;
+      if (editing == null) {
+        await widget.onCreateAgent(
+          name: _name.text.trim(),
+          email: _email.text.trim(),
+          password: _password.text,
+          eventId: _eventId!,
+        );
+      } else {
+        await widget.onUpdateAgent(
+          id: editing.id,
+          name: _name.text.trim(),
+          email: _email.text.trim(),
+          password: _password.text,
+          eventId: _eventId!,
+        );
+      }
+      if (mounted) {
+        _name.clear();
+        _email.clear();
+        _password.clear();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Agent ajouté. Il peut se connecter avec son e-mail et son mot de passe.',
+            ),
+          ),
+        );
+        Navigator.pop(context);
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Cet e-mail est déjà associé à un agent.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        4,
+        20,
+        MediaQuery.viewInsetsOf(context).bottom + 24,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Mode Agent',
+              style: TextStyle(
+                fontSize: 23,
+                fontWeight: FontWeight.w800,
+                color: _ink,
+              ),
+            ),
+            const SizedBox(height: 5),
+            const Text(
+              'Créez un accès limité à un événement.',
+              style: TextStyle(color: _muted),
+            ),
+            if (widget.agents.isNotEmpty) ...[
+              const SizedBox(height: 14),
+              ...widget.agents.map((agent) {
+                final event = _eventFor(widget.events, agent.eventId);
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const CircleAvatar(
+                    child: Icon(Icons.badge_outlined),
+                  ),
+                  title: Text(agent.name),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: 'Modifier l’agent',
+                        onPressed: () => _edit(agent),
+                        icon: const Icon(Icons.edit_outlined),
+                      ),
+                      IconButton(
+                        tooltip: 'Supprimer l’agent',
+                        onPressed: () => _delete(agent),
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                    ],
+                  ),
+                  subtitle: Text(
+                    '${agent.email} · ${event?.name ?? 'Événement supprimé'}',
+                  ),
+                );
+              }),
+            ],
+            const SizedBox(height: 12),
+            Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  TextFormField(
+                    controller: _name,
+                    decoration: const InputDecoration(
+                      labelText: 'Nom de l’agent',
+                    ),
+                    validator: (value) => value == null || value.trim().isEmpty
+                        ? 'Renseignez le nom.'
+                        : null,
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    controller: _email,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(
+                      labelText: 'E-mail de connexion',
+                    ),
+                    validator: (value) => value == null || !value.contains('@')
+                        ? 'Renseignez un e-mail valide.'
+                        : null,
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    controller: _password,
+                    obscureText: !_showPassword,
+                    decoration: InputDecoration(
+                      labelText: 'Mot de passe (6 caractères minimum)',
+                      suffixIcon: IconButton(
+                        onPressed: () =>
+                            setState(() => _showPassword = !_showPassword),
+                        icon: Icon(
+                          _showPassword
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                        tooltip: 'Afficher ou masquer le mot de passe',
+                      ),
+                    ),
+                    validator: (value) => value == null || value.length < 6
+                        ? 'Choisissez au moins 6 caractères.'
+                        : null,
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<int>(
+                    initialValue: _eventId,
+                    decoration: const InputDecoration(
+                      labelText: 'Événement autorisé',
+                    ),
+                    items: widget.events
+                        .map(
+                          (event) => DropdownMenuItem(
+                            value: event.id,
+                            child: Text(
+                              event.name,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) => setState(() => _eventId = value),
+                    validator: (value) =>
+                        value == null ? 'Sélectionnez un événement.' : null,
+                  ),
+                  const SizedBox(height: 14),
+                  FilledButton.icon(
+                    onPressed: _saving ? null : _create,
+                    icon: Icon(
+                      _editingAgent == null
+                          ? Icons.person_add_alt_1
+                          : Icons.save_outlined,
+                    ),
+                    label: Text(
+                      _saving
+                          ? 'Enregistrement…'
+                          : _editingAgent == null
+                          ? 'Créer l’agent'
+                          : 'Enregistrer les modifications',
+                    ),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(50),
+                    ),
+                  ),
+                  if (_editingAgent != null) ...[
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: _saving
+                          ? null
+                          : () => setState(() {
+                              _editingAgent = null;
+                              _name.clear();
+                              _email.clear();
+                              _password.clear();
+                              _eventId = null;
+                              _showPassword = false;
+                            }),
+                      child: const Text('Annuler la modification'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Connexion locale de démonstration : les identifiants sont stockés sur cet appareil.',
+              style: TextStyle(color: _muted, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _PlanStatus extends StatelessWidget {
   const _PlanStatus();
 
@@ -2890,16 +4394,332 @@ class _AccessCard extends StatelessWidget {
   );
 }
 
+class AgentHomePage extends StatelessWidget {
+  const AgentHomePage({
+    super.key,
+    required this.agent,
+    required this.event,
+    required this.leads,
+    required this.onCapture,
+    required this.onScan,
+    required this.onLogout,
+  });
+
+  final AgentItem agent;
+  final EventItem event;
+  final List<LeadItem> leads;
+  final VoidCallback onCapture;
+  final VoidCallback onScan;
+  final VoidCallback onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final today = leads.where((lead) {
+      final date = DateTime.tryParse(lead.createdAt);
+      return date != null &&
+          date.year == now.year &&
+          date.month == now.month &&
+          date.day == now.day;
+    }).length;
+    final hot = leads.where((lead) => lead.priority == 'Chaud').length;
+    final warm = leads.where((lead) => lead.priority == 'Tiède').length;
+    final info = leads.where((lead) => lead.priority == 'Info').length;
+    int percent(int count) =>
+        leads.isEmpty ? 0 : (count * 100 / leads.length).round();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text(
+          'Espace agent',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+        actions: [
+          IconButton(
+            onPressed: onLogout,
+            tooltip: 'Se déconnecter',
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+        children: [
+          Text(
+            'Bonjour ${agent.name}',
+            style: const TextStyle(
+              fontSize: 25,
+              fontWeight: FontWeight.w800,
+              color: _ink,
+            ),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'Votre activité sur votre événement',
+            style: TextStyle(color: _muted),
+          ),
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: _brandDark,
+              borderRadius: BorderRadius.circular(22),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(
+                  children: [
+                    Icon(
+                      Icons.event_available,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'ÉVÉNEMENT AUTORISÉ',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        letterSpacing: 1.1,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 9),
+                Text(
+                  event.name,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '${event.city} · ${_shortDate(event.startDate)} — ${_shortDate(event.endDate)}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+                Text(
+                  'Stand ${event.stand.isEmpty ? '—' : event.stand}',
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: _MetricCard(
+                  icon: Icons.people_alt_outlined,
+                  value: '${leads.length}',
+                  title: 'Visiteurs capturés',
+                  tint: _brandTint,
+                  onTap: () {},
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _MetricCard(
+                  icon: Icons.today_outlined,
+                  value: '$today',
+                  title: 'Aujourd’hui',
+                  tint: const Color(0xFFFFF0EC),
+                  onTap: () {},
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          FilledButton.icon(
+            onPressed: onScan,
+            icon: const Icon(Icons.qr_code_scanner_rounded),
+            label: const Text('Scanner un badge'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(52),
+            ),
+          ),
+          const SizedBox(height: 9),
+          OutlinedButton.icon(
+            onPressed: onCapture,
+            icon: const Icon(Icons.person_add_alt_1),
+            label: const Text('Saisir un visiteur'),
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(50),
+            ),
+          ),
+          const SizedBox(height: 22),
+          const Text(
+            'MON ÉVOLUTION CRM',
+            style: TextStyle(
+              fontSize: 11,
+              letterSpacing: 1.4,
+              fontWeight: FontWeight.w800,
+              color: _muted,
+            ),
+          ),
+          const SizedBox(height: 10),
+          _AgentCrmRow(
+            label: 'Chaud',
+            count: hot,
+            percent: percent(hot),
+            color: const Color(0xFFC64F36),
+          ),
+          _AgentCrmRow(
+            label: 'Tiède',
+            count: warm,
+            percent: percent(warm),
+            color: const Color(0xFFB77A1B),
+          ),
+          _AgentCrmRow(
+            label: 'Info',
+            count: info,
+            percent: percent(info),
+            color: const Color(0xFF517B99),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            '${leads.length} visiteur${leads.length == 1 ? '' : 's'} au total · $today aujourd’hui',
+            style: const TextStyle(color: _muted),
+          ),
+          const SizedBox(height: 22),
+          Text(
+            'Mes visiteurs (${leads.length})',
+            style: const TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              color: _ink,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (leads.isEmpty)
+            const _EmptyHint(
+              icon: Icons.people_outline,
+              text:
+                  'Vos visiteurs apparaîtront ici après vos premières saisies.',
+            )
+          else
+            ...leads.map((lead) => LeadCard(lead: lead, event: event)),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(15),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(17),
+              border: Border.all(color: _line),
+            ),
+            child: Row(
+              children: [
+                const CircleAvatar(
+                  backgroundColor: _brandTint,
+                  child: Icon(Icons.person_outline, color: _brand),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        agent.name,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color: _ink,
+                        ),
+                      ),
+                      Text(
+                        agent.email,
+                        style: const TextStyle(fontSize: 12, color: _muted),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.verified_user_outlined, color: _brand),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: onLogout,
+            icon: const Icon(Icons.logout),
+            label: const Text('Se déconnecter'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AgentCrmRow extends StatelessWidget {
+  const _AgentCrmRow({
+    required this.label,
+    required this.count,
+    required this.percent,
+    required this.color,
+  });
+  final String label;
+  final int count;
+  final int percent;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(fontWeight: FontWeight.w700, color: color),
+                ),
+              ),
+              Text(
+                '$count · $percent%',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: _ink,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 9),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: LinearProgressIndicator(
+              value: percent / 100,
+              minHeight: 8,
+              color: color,
+              backgroundColor: color.withValues(alpha: 0.12),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 class CapturePage extends StatefulWidget {
   const CapturePage({
     super.key,
     required this.event,
     required this.onSave,
     this.initialScan = false,
+    this.initialOwner,
   });
   final EventItem event;
   final Future<void> Function(LeadDraft draft) onSave;
   final bool initialScan;
+  final String? initialOwner;
 
   @override
   State<CapturePage> createState() => _CapturePageState();
@@ -2907,6 +4727,8 @@ class CapturePage extends StatefulWidget {
 
 class _CapturePageState extends State<CapturePage> {
   final _formKey = GlobalKey<FormState>();
+  final _audioRecorder = AudioRecorder();
+  final _voiceBytes = <int>[];
   final _name = TextEditingController();
   final _company = TextEditingController();
   final _position = TextEditingController();
@@ -2915,14 +4737,26 @@ class _CapturePageState extends State<CapturePage> {
   final _note = TextEditingController();
   final _owner = TextEditingController(text: 'Équipe de stand');
   final List<String> _selectedTags = [];
+  StreamSubscription<Uint8List>? _voiceStream;
+  Timer? _voiceTimer;
+  Uint8List? _voiceNote;
   String _priority = 'Tiède';
   bool _saving = false;
   bool _continueScanning = false;
+  bool _recordingVoice = false;
+  bool _playingVoice = false;
+  int _voiceSeconds = 0;
+  final _voicePlayer = AudioPlayer();
+  StreamSubscription<void>? _voicePlaybackSubscription;
 
   @override
   void initState() {
     super.initState();
+    _owner.text = widget.initialOwner ?? 'Équipe de stand';
     _continueScanning = widget.initialScan;
+    _voicePlaybackSubscription = _voicePlayer.onPlayerComplete.listen((_) {
+      if (mounted) setState(() => _playingVoice = false);
+    });
     if (widget.initialScan) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scan());
     }
@@ -2930,6 +4764,12 @@ class _CapturePageState extends State<CapturePage> {
 
   @override
   void dispose() {
+    _voiceTimer?.cancel();
+    _voiceStream?.cancel();
+    _voicePlaybackSubscription?.cancel();
+    if (_recordingVoice) unawaited(_audioRecorder.stop());
+    unawaited(_audioRecorder.dispose());
+    unawaited(_voicePlayer.dispose());
     _name.dispose();
     _company.dispose();
     _position.dispose();
@@ -2940,11 +4780,111 @@ class _CapturePageState extends State<CapturePage> {
     super.dispose();
   }
 
+  Future<void> _startVoiceRecording() async {
+    try {
+      if (!await _audioRecorder.hasPermission()) {
+        if (mounted) {
+          _message(
+            context,
+            'Autorisez l’accès au microphone pour enregistrer.',
+          );
+        }
+        return;
+      }
+      _voiceBytes.clear();
+      final stream = await _audioRecorder.startStream(
+        const RecordConfig(
+          encoder: AudioEncoder.pcm16bits,
+          sampleRate: 16000,
+          numChannels: 1,
+        ),
+      );
+      _voiceStream = stream.listen(
+        _voiceBytes.addAll,
+        onError: (Object error) {
+          if (mounted) {
+            _message(context, 'Enregistrement vocal impossible : $error');
+          }
+          _stopVoiceRecording();
+        },
+      );
+      if (!mounted) return;
+      setState(() {
+        _recordingVoice = true;
+        _voiceSeconds = 0;
+        _voiceNote = null;
+      });
+      _voiceTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        if (_voiceSeconds >= 14) {
+          timer.cancel();
+          setState(() => _voiceSeconds = 15);
+          _stopVoiceRecording();
+        } else {
+          setState(() => _voiceSeconds++);
+        }
+      });
+    } catch (error) {
+      if (mounted) {
+        _message(context, 'Démarrage du microphone impossible : $error');
+      }
+    }
+  }
+
+  Future<void> _stopVoiceRecording() async {
+    if (!_recordingVoice) return;
+    _voiceTimer?.cancel();
+    try {
+      await _audioRecorder.stop();
+      await _voiceStream?.cancel();
+      _voiceStream = null;
+      if (!mounted) return;
+      setState(() {
+        _recordingVoice = false;
+        _voiceNote = _voiceBytes.isEmpty
+            ? null
+            : Uint8List.fromList(_voiceBytes);
+      });
+      if (_voiceNote == null) {
+        _message(context, 'Aucun son enregistré. Réessayez.');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _recordingVoice = false);
+        _message(context, 'Arrêt de l’enregistrement impossible : $error');
+      }
+    }
+  }
+
+  Future<void> _toggleVoicePlayback() async {
+    if (_recordingVoice) return;
+    final voiceNote = _voiceNote;
+    if (voiceNote == null || voiceNote.isEmpty) return;
+    if (_playingVoice) {
+      await _voicePlayer.stop();
+      if (mounted) setState(() => _playingVoice = false);
+      return;
+    }
+    try {
+      await _voicePlayer.play(
+        BytesSource(_voiceNoteWav(voiceNote), mimeType: 'audio/wav'),
+      );
+      if (mounted) setState(() => _playingVoice = true);
+    } catch (error) {
+      if (mounted) {
+        _message(context, 'Lecture de la note vocale impossible : $error');
+      }
+    }
+  }
+
   Future<void> _scan() async {
     final data = await Navigator.of(context).push<Map<String, String>>(
       MaterialPageRoute(builder: (_) => const _QrScannerPage()),
     );
-    if (data == null || !mounted) return;
+    if (!mounted) return;
+    if (data == null) {
+      setState(() => _continueScanning = false);
+      return;
+    }
     setState(() {
       _name.text = data['name'] ?? _name.text;
       _company.text = data['company'] ?? _company.text;
@@ -2956,6 +4896,7 @@ class _CapturePageState extends State<CapturePage> {
   }
 
   Future<void> _save() async {
+    if (_recordingVoice) await _stopVoiceRecording();
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
     try {
@@ -2971,6 +4912,7 @@ class _CapturePageState extends State<CapturePage> {
           priority: _priority,
           tags: _selectedTags,
           note: _note.text,
+          voiceNote: _voiceNote,
         ),
       );
       if (mounted) {
@@ -2980,10 +4922,15 @@ class _CapturePageState extends State<CapturePage> {
         _email.clear();
         _phone.clear();
         _note.clear();
+        _voiceNote = null;
+        _voiceBytes.clear();
+        await _voicePlayer.stop();
+        _playingVoice = false;
         _selectedTags.clear();
         _priority = 'Tiède';
         _formKey.currentState?.reset();
-        _message(context, 'Prospect enregistré sur cet appareil.');
+        if (!mounted) return;
+        _message(context, 'Visiteur enregistré sur cet appareil.');
         if (_continueScanning) {
           await _scan();
         }
@@ -3001,7 +4948,7 @@ class _CapturePageState extends State<CapturePage> {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
       title: const Text(
-        'Nouveau prospect',
+        'Nouveau visiteur',
         style: TextStyle(fontWeight: FontWeight.w800),
       ),
       leading: IconButton(
@@ -3169,14 +5116,75 @@ class _CapturePageState extends State<CapturePage> {
             ],
           ),
           const SizedBox(height: 14),
-          TextFormField(
-            controller: _note,
-            maxLines: 3,
-            decoration: const InputDecoration(
-              labelText: 'Note de conversation',
-              alignLabelWithHint: true,
-              prefixIcon: Icon(Icons.notes_outlined),
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: TextFormField(
+                  controller: _note,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Note de conversation',
+                    alignLabelWithHint: true,
+                    prefixIcon: Icon(Icons.notes_outlined),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton.filledTonal(
+                    onPressed: _recordingVoice
+                        ? _stopVoiceRecording
+                        : _startVoiceRecording,
+                    tooltip: _recordingVoice
+                        ? 'Arrêter l’enregistrement'
+                        : 'Enregistrer une note vocale de 15 secondes maximum',
+                    icon: Icon(
+                      _recordingVoice ? Icons.stop : Icons.mic_none_outlined,
+                    ),
+                    style: IconButton.styleFrom(
+                      foregroundColor: _recordingVoice
+                          ? const Color(0xFFC64F36)
+                          : _brand,
+                    ),
+                  ),
+                  Text(
+                    _recordingVoice
+                        ? '$_voiceSeconds/15 s'
+                        : _voiceNote != null
+                        ? 'Note prête'
+                        : '15 s max',
+                    style: const TextStyle(fontSize: 10, color: _muted),
+                  ),
+                  if (_voiceNote != null && !_recordingVoice)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: _playingVoice ? 'Arrêter' : 'Écouter',
+                          onPressed: _toggleVoicePlayback,
+                          icon: Icon(
+                            _playingVoice ? Icons.stop : Icons.play_arrow,
+                            size: 19,
+                          ),
+                        ),
+                        IconButton(
+                          visualDensity: VisualDensity.compact,
+                          tooltip: 'Supprimer la note vocale',
+                          onPressed: () => setState(() {
+                            _voiceNote = null;
+                            _voiceBytes.clear();
+                          }),
+                          icon: const Icon(Icons.delete_outline, size: 19),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+            ],
           ),
           const SizedBox(height: 13),
           TextFormField(
@@ -3190,7 +5198,7 @@ class _CapturePageState extends State<CapturePage> {
           const SizedBox(height: 13),
           const _PrototypeNote(
             text:
-                'Le prospect sera enregistré localement. L’envoi du pass, du catalogue PDF et de la carte commerciale n’est pas actif dans ce prototype.',
+                'Le visiteur sera enregistré localement. L’envoi du pass, du catalogue PDF et de la carte commerciale n’est pas actif dans ce prototype.',
           ),
         ],
       ),
@@ -3283,28 +5291,38 @@ class _QrScannerPageState extends State<_QrScannerPage> {
           },
         ),
         Center(
-          child: Container(
-            width: 260,
-            height: 200,
-            decoration: BoxDecoration(
-              border: Border.all(color: _lime, width: 3),
-              borderRadius: BorderRadius.circular(24),
-            ),
-          ),
-        ),
-        const Positioned(
-          left: 28,
-          right: 28,
-          bottom: 46,
-          child: Text(
-            'Placez le QR code du badge dans le cadre.',
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-              shadows: [Shadow(color: Colors.black87, blurRadius: 8)],
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 28),
+                child: Text(
+                  'Placez le QR code du badge dans le cadre.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    shadows: [Shadow(color: Colors.black87, blurRadius: 8)],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                width: 260,
+                height: 200,
+                decoration: BoxDecoration(
+                  border: Border.all(color: _accent, width: 3),
+                  borderRadius: BorderRadius.circular(24),
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.tonalIcon(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.edit_note_outlined),
+                label: const Text('Ouvrir le formulaire'),
+              ),
+            ],
           ),
         ),
       ],
@@ -3368,7 +5386,7 @@ class _LocalNotice extends StatelessWidget {
         const SizedBox(width: 8),
         Expanded(
           child: Text(
-            '$count prospect${count == 1 ? '' : 's'} enregistré${count == 1 ? '' : 's'} sur cet appareil · synchronisation indisponible',
+            '$count visiteur${count == 1 ? '' : 's'} enregistré${count == 1 ? '' : 's'} sur cet appareil · synchronisation indisponible',
             style: const TextStyle(
               color: Color(0xFF805817),
               fontSize: 11,
