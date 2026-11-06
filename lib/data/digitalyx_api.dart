@@ -35,7 +35,7 @@ class DigitalyxApi {
     'https://dev.inovyx.net/digitalyx/Inyx/api-public/createAccount/',
   );
   static final Uri _loginUri = Uri.parse(
-    'https://dev.inovyx.net/digitalyx/Inyx/api/login',
+    'https://dev.inovyx.net/digitalyx/Inyx/api/login/',
   );
 
   final http.Client _client;
