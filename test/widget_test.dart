@@ -93,7 +93,9 @@ void main() {
     expect(find.text('Ce champ est obligatoire'), findsNWidgets(2));
   });
 
-  testWidgets('email fields provide @ and @gmail.com buttons', (tester) async {
+  testWidgets('login email field provides @ and @gmail.com buttons', (
+    tester,
+  ) async {
     await tester.pumpWidget(DigitalyxApp(store: _FakeStore()));
     await tester.pumpAndSettle();
 
@@ -107,150 +109,105 @@ void main() {
       tester.widget<TextFormField>(loginEmail).controller!.text,
       'demo@gmail.com',
     );
-
-    await tester.tap(find.text('Créer un compte'));
-    await tester.pumpAndSettle();
-    final registrationEmail = find.widgetWithText(TextFormField, 'E-mail');
-    await tester.enterText(registrationEmail, 'demo');
-    await tester.tap(find.text('@gmail.com').last);
-    expect(
-      tester.widget<TextFormField>(registrationEmail).controller!.text,
-      'demo@gmail.com',
-    );
   });
 
-  testWidgets('registration welcomes the user by their full name', (
+  testWidgets('registration submits trimmed data and returns to login', (
     tester,
   ) async {
-    await tester.pumpWidget(DigitalyxApp(store: _FakeStore()));
+    RegistrationData? submitted;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LoginPage(
+          onLogin: (_, _) async => false,
+          onCreateAccount: (registration) async {
+            submitted = registration;
+            return const {'C_ID': '42'};
+          },
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Créer un compte'));
     await tester.pumpAndSettle();
 
     expect(find.text('Inscription exposant'), findsOneWidget);
-    expect(find.text('Nom complet'), findsOneWidget);
-    expect(find.text('Prénom'), findsNothing);
-    expect(find.text('Nom de famille'), findsNothing);
-    expect(find.text('E-mail'), findsOneWidget);
-    expect(find.text('Entreprise'), findsOneWidget);
-    expect(find.text('Poste'), findsOneWidget);
-    expect(find.text('Numéro de téléphone'), findsOneWidget);
-    await tester.drag(find.byType(ListView).first, const Offset(0, -1000));
-    await tester.pumpAndSettle();
-    expect(find.text('Mot de passe'), findsOneWidget);
-    expect(find.text('Confirmer le mot de passe'), findsOneWidget);
-    final confirmPasswordField = find.widgetWithText(
-      TextFormField,
-      'Confirmer le mot de passe',
-    );
-    final passwordField = find.widgetWithText(TextFormField, 'Mot de passe');
-    final passwordTextField = find.descendant(
-      of: passwordField,
-      matching: find.byType(TextField),
-    );
-    final confirmPasswordTextField = find.descendant(
-      of: confirmPasswordField,
-      matching: find.byType(TextField),
-    );
-    expect(tester.widget<TextField>(passwordTextField).obscureText, isTrue);
-    expect(
-      tester.widget<TextField>(confirmPasswordTextField).obscureText,
-      isTrue,
-    );
-
-    await tester.drag(find.byType(ListView).first, const Offset(0, 2000));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextFormField).at(0), 'Ada Lovelace');
-    await tester.enterText(find.byType(TextFormField).at(1), 'ada@example.com');
     await tester.enterText(
-      find.byType(TextFormField).at(2),
-      'Analytical Engines',
+      find.widgetWithText(TextFormField, 'Nom de l’entreprise ou du client'),
+      '  Ada Lovelace  ',
     );
-    await tester.enterText(find.byType(TextFormField).at(3), 'Ingénieure');
-    await tester.drag(find.byType(ListView).first, const Offset(0, -650));
-    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'E-mail'),
+      '  ada@example.com  ',
+    );
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Numéro de téléphone'),
-      '+33123456789',
+      ' +33123456789 ',
     );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Mot de passe'),
-      'MotDePasse123',
-    );
-    await tester.enterText(confirmPasswordField, 'MotDePasse123');
-    tester.testTextInput.hide();
-    await tester.pumpAndSettle();
     await tester.ensureVisible(find.text('Continuer'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Continuer'));
     await tester.pumpAndSettle();
 
+    expect(submitted?.fullName, 'Ada Lovelace');
+    expect(submitted?.email, 'ada@example.com');
+    expect(submitted?.phone, '+33123456789');
     expect(find.text('WELCOME, ADA LOVELACE!'), findsOneWidget);
-    final welcome = find.byType(WelcomePage);
-    final gradientBackground = tester.widget<DecoratedBox>(
-      find
-          .descendant(
-            of: welcome,
-            matching: find.byWidgetPredicate(
-              (widget) =>
-                  widget is DecoratedBox &&
-                  widget.decoration is BoxDecoration &&
-                  (widget.decoration as BoxDecoration).gradient
-                      is LinearGradient,
-            ),
-          )
-          .first,
-    );
-    final welcomeGradient =
-        (gradientBackground.decoration as BoxDecoration).gradient!
-            as LinearGradient;
-    expect(welcomeGradient.colors, [
-      Colors.white,
-      const Color(0xFFF4F6FB),
-      const Color(0xFFE6EEFC),
-    ]);
-    expect(
-      find.descendant(of: welcome, matching: find.byType(CustomPaint)),
-      findsNWidgets(2),
-    );
-    expect(
-      find.text(
-        'Bienvenue sur votre nouvelle plateforme exposant Digitalyx Exhibitor. Connectez-vous pour accéder à votre portail exclusif et gérer vos événements.',
-      ),
-      findsOneWidget,
-    );
 
     await tester.tap(find.text('COMMENCER'));
     await tester.pumpAndSettle();
-    expect(find.text('LOGIN'), findsOneWidget);
     expect(find.text('ada@example.com'), findsOneWidget);
+    expect(
+      find.text(
+        'Compte créé. Consultez votre e-mail pour recevoir le mot de passe temporaire.',
+      ),
+      findsOneWidget,
+    );
   });
 
-  testWidgets('registration rejects a mismatched password confirmation', (
+  testWidgets('registration validates required fields, email, and phone', (
     tester,
   ) async {
-    await tester.pumpWidget(DigitalyxApp(store: _FakeStore()));
+    var createAccountCalled = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LoginPage(
+          onLogin: (_, _) async => false,
+          onCreateAccount: (_) async {
+            createAccountCalled = true;
+            return const {};
+          },
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Créer un compte'));
     await tester.pumpAndSettle();
-
-    await tester.drag(find.byType(ListView).first, const Offset(0, -2000));
-    await tester.pumpAndSettle();
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Mot de passe'),
-      'MotDePasse123',
-    );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Confirmer le mot de passe'),
-      'Different123',
-    );
-    tester.testTextInput.hide();
-    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Continuer'));
     await tester.tap(find.text('Continuer'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Les mots de passe ne correspondent pas'), findsOneWidget);
-    expect(find.text('WELCOME, '), findsNothing);
+    expect(find.text('Ce champ est obligatoire'), findsNWidgets(2));
+    expect(find.text('Champ obligatoire'), findsOneWidget);
+
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Nom de l’entreprise ou du client'),
+      'Ada Lovelace',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'E-mail'),
+      'adresse-invalide',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Numéro de téléphone'),
+      '123',
+    );
+    await tester.ensureVisible(find.text('Continuer'));
+    await tester.tap(find.text('Continuer'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Adresse e-mail invalide'), findsOneWidget);
+    expect(find.text('Numéro de téléphone invalide'), findsOneWidget);
+    expect(find.text('Inscription exposant'), findsOneWidget);
+    expect(createAccountCalled, isFalse);
   });
 }
 
