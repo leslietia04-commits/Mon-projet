@@ -34,6 +34,10 @@ const _line = Color(0xFFE3E8F2);
 const _muted = Color(0xFF68738C);
 const _mutedSoft = Color(0xFF9AA4B8);
 
+// Désactiver temporairement les appels d'authentification distants pendant
+// le travail sur l'interface. Remettre à true pour réactiver l'API.
+const _apiEnabled = false;
+
 const _directory = [
   ExhibitorProfile(
     name: 'ÉcoNova Solutions',
@@ -146,10 +150,12 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
   }
 
   Future<bool> _login(String username, String password) async {
-    final result = await _api.login(email: username, password: password);
+    final displayName = _apiEnabled
+        ? (await _api.login(email: username, password: password)).displayName
+        : username.trim().split('@').first;
     setState(() {
       _username = username;
-      _accountName = result.displayName;
+      _accountName = displayName.isEmpty ? 'Exposant' : displayName;
       _activeAgent = null;
       _hasDemoSession = true;
       _tab = 0;
@@ -159,11 +165,14 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
 
   Future<Map<String, dynamic>> _registerAccount(
     RegistrationData registration,
-  ) => _api.createAccount(
-    name: registration.fullName,
-    email: registration.email,
-    contact: registration.phone,
-  );
+  ) async {
+    if (!_apiEnabled) return {'status': 'LOCAL_DEMO'};
+    return _api.createAccount(
+      name: registration.fullName,
+      email: registration.email,
+      contact: registration.phone,
+    );
+  }
 
   Future<void> _createAgent({
     required String name,
@@ -448,6 +457,10 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
         onEvents: () => setState(() => _tab = 3),
         onLeads: () => _openVisitorsForPriority('Tout'),
         onProfile: () => setState(() => _tab = 4),
+        onChangePassword: () => _showChangePasswordDialog(
+          context,
+          _showMessage,
+        ),
         onSaveProgramme: _updateEventProgramme,
         onPriority: _openVisitorsForPriority,
         onExecutivePosition: _openVisitorsForPosition,
@@ -531,6 +544,14 @@ class _DigitalyxAppState extends State<DigitalyxApp> {
   }
 }
 
+String _networkErrorMessage(Object error, String action) {
+  final details = error.toString();
+  if (kIsWeb && details.toLowerCase().contains('failed to fetch')) {
+    return 'Le navigateur bloque la requête (CORS). Le serveur Digitalyx doit autoriser OPTIONS et POST depuis l’adresse de cette application.';
+  }
+  return '$action : $details';
+}
+
 class LoginPage extends StatefulWidget {
   const LoginPage({
     super.key,
@@ -591,7 +612,7 @@ class _LoginPageState extends State<LoginPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             duration: const Duration(seconds: 10),
-            content: Text('Erreur de connexion : $error'),
+            content: Text(_networkErrorMessage(error, 'Erreur de connexion')),
           ),
         );
         debugPrint('Erreur connexion Digitalyx: $error');
@@ -705,6 +726,14 @@ class _LoginPageState extends State<LoginPage> {
               textAlign: TextAlign.center,
               style: TextStyle(color: _muted, fontSize: 12),
             ),
+            if (!_apiEnabled) ...[
+              const SizedBox(height: 10),
+              const Text(
+                'Mode local temporaire : toute adresse et tout mot de passe valides ouvrent la démo. Aucun appel à l’API.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _brand, fontSize: 11),
+              ),
+            ],
             const SizedBox(height: 17),
             _loginField(
               controller: _username,
@@ -947,9 +976,11 @@ class _LoginPageState extends State<LoginPage> {
         );
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'Compte créé. Consultez votre e-mail pour recevoir le mot de passe temporaire.',
+              _apiEnabled
+                  ? 'Compte créé. Consultez votre e-mail pour recevoir le mot de passe temporaire.'
+                  : 'Inscription de démonstration terminée. Aucun compte n’a été créé sur le serveur.',
             ),
             behavior: SnackBarBehavior.floating,
           ),
@@ -973,7 +1004,9 @@ class _LoginPageState extends State<LoginPage> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               duration: const Duration(seconds: 10),
-              content: Text('Erreur de création du compte : $error'),
+              content: Text(
+                _networkErrorMessage(error, 'Erreur de création du compte'),
+              ),
             ),
           );
           debugPrint('Erreur création compte Digitalyx: $error');
@@ -1090,8 +1123,10 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   ),
                 ),
                 const SizedBox(height: 6),
-                const Text(
-                  'Digitalyx enverra vos identifiants temporaires à cette adresse e-mail.',
+                Text(
+                  _apiEnabled
+                      ? 'Digitalyx enverra vos identifiants temporaires à cette adresse e-mail.'
+                      : 'Mode local temporaire : cette inscription sert uniquement à prévisualiser le parcours.',
                   style: TextStyle(color: _muted, fontSize: 13),
                 ),
                 const SizedBox(height: 20),
@@ -1148,8 +1183,10 @@ class _RegistrationPageState extends State<RegistrationPage> {
                   ),
                 ),
                 const SizedBox(height: 14),
-                const Text(
-                  'Après création, consultez votre e-mail. Le mot de passe temporaire devra être changé à la première connexion.',
+                Text(
+                  _apiEnabled
+                      ? 'Après création, consultez votre e-mail. Le mot de passe temporaire devra être changé à la première connexion.'
+                      : 'Aucun e-mail ne sera envoyé tant que le mode local est activé.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: _muted, fontSize: 11, height: 1.4),
                 ),
@@ -1636,6 +1673,7 @@ class HomePage extends StatelessWidget {
     required this.onEvents,
     required this.onLeads,
     required this.onProfile,
+    required this.onChangePassword,
     required this.onSaveProgramme,
     required this.onPriority,
     required this.onExecutivePosition,
@@ -1649,6 +1687,7 @@ class HomePage extends StatelessWidget {
   final VoidCallback onEvents;
   final VoidCallback onLeads;
   final VoidCallback onProfile;
+  final VoidCallback onChangePassword;
   final Future<void> Function(int eventId, String programme) onSaveProgramme;
   final ValueChanged<String> onPriority;
   final ValueChanged<String> onExecutivePosition;
@@ -1726,6 +1765,16 @@ class HomePage extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 14),
+        OutlinedButton.icon(
+          onPressed: onChangePassword,
+          icon: const Icon(Icons.lock_reset_outlined),
+          label: const Text('Modifier mon mot de passe'),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(48),
+            foregroundColor: _brand,
+          ),
+        ),
+        const SizedBox(height: 6),
         InkWell(
           onTap: onProfile,
           borderRadius: BorderRadius.circular(17),
@@ -4017,6 +4066,85 @@ class ProfilePage extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+Future<void> _showChangePasswordDialog(
+  BuildContext context,
+  ValueChanged<String> onMessage,
+) async {
+  final formKey = GlobalKey<FormState>();
+  final currentPassword = TextEditingController();
+  final newPassword = TextEditingController();
+  final confirmation = TextEditingController();
+  final accepted = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Modifier mon mot de passe'),
+      content: Form(
+        key: formKey,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Saisissez votre code actuel, puis choisissez un nouveau mot de passe.',
+                style: TextStyle(color: _muted),
+              ),
+              const SizedBox(height: 14),
+              TextFormField(
+                controller: currentPassword,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Code actuel'),
+                validator: _requiredValidator,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: newPassword,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Nouveau mot de passe',
+                ),
+                validator: _passwordValidator,
+              ),
+              const SizedBox(height: 10),
+              TextFormField(
+                controller: confirmation,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Confirmer le nouveau mot de passe',
+                ),
+                validator: (value) => value != newPassword.text
+                    ? 'Les mots de passe ne correspondent pas'
+                    : null,
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Annuler'),
+        ),
+        FilledButton(
+          onPressed: () {
+            if (formKey.currentState!.validate()) {
+              Navigator.pop(dialogContext, true);
+            }
+          },
+          child: const Text('Continuer'),
+        ),
+      ],
+    ),
+  );
+  currentPassword.dispose();
+  newPassword.dispose();
+  confirmation.dispose();
+  if (accepted == true && context.mounted) {
+    onMessage(
+      'Demande non enregistrée : le mode local est actif et l’API ne fournit pas encore de route de changement de mot de passe.',
     );
   }
 }
