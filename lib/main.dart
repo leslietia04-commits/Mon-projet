@@ -34,9 +34,8 @@ const _line = Color(0xFFE3E8F2);
 const _muted = Color(0xFF68738C);
 const _mutedSoft = Color(0xFF9AA4B8);
 
-// Désactiver temporairement les appels d'authentification distants pendant
-// le travail sur l'interface. Remettre à true pour réactiver l'API.
-const _apiEnabled = false;
+// Active ou désactive les appels d'authentification distants.
+const _apiEnabled = true;
 
 const _directory = [
   ExhibitorProfile(
